@@ -1,0 +1,18 @@
+# Entorno Virtual (venv o cualquier otro)
+venv/
+.venv/
+env/
+
+# Archivos de configuración y claves sensibles
+.env
+config.ini
+keys.json
+
+# Archivos de compilación de Python
+__pycache__/
+*.pyc
+*.pyd
+
+# Logs y bases de datos locales
+*.log
+*.sqlite
