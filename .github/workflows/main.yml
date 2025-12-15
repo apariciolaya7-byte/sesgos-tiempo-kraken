@@ -35,6 +35,6 @@ jobs:
     - name: Commit and Push new report
       uses: stefanzweifel/git-auto-commit-action@v5
       with:
-        # Sólo sube el archivo de reporte CSV
-        files: time_bias_hourly_analysis.csv
+        # CORRECCIÓN: Usamos 'file_pattern' en lugar de 'files'
+        file_pattern: time_bias_hourly_analysis.csv
         commit_message: 'ci: Nuevo reporte de sesgo horario'
