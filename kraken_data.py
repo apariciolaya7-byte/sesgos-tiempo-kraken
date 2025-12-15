@@ -2,6 +2,7 @@ import ccxt
 import os
 from dotenv import load_dotenv
 import pandas as pd
+import pytz
 
 # 1. Cargar variables del archivo .env
 load_dotenv()
@@ -75,12 +76,38 @@ def fetch_data_to_dataframe(exchange, symbol='BTC/USD', timeframe='1h', limit=24
         print(f"❌ Error al obtener datos OHLCV: {e}")
         return None
 
+def preprocess_data_for_time_bias(df):
+    """
+    Normaliza el timestamp a UTC y calcula la volatilidad de la vela.
+    """
+    
+    # 1. Asegurar UTC (si el timestamp no tiene una zona horaria asignada)
+    # Convertimos el timestamp a un índice de pandas para facilitar el manejo.
+    df = df.set_index(df['timestamp'])
+    
+    # Localizar (o asignar) la zona horaria UTC. 
+    # Usamos .tz_localize para ASIGNAR la zona horaria a datos 'naive' (sin zona horaria).
+    if df.index.tz is None:
+        df.index = df.index.tz_localize(pytz.utc)
+
+    # 2. Crear Columna de Hora (Para la estrategia de Kill Zones)
+    df['hour_utc'] = df.index.hour
+    
+    # 3. Calcular Rango (Volatilidad)
+    df['candle_range'] = df['high'] - df['low']
+    
+    print(f"✅ Datos pre-procesados. Zona horaria: {df.index.tz}")
+    return df.reset_index(drop=True)
+
+
 if __name__ == '__main__':
     kraken = initialize_kraken_exchange()
     if kraken:
-        # Probamos la nueva función
         historical_data = fetch_data_to_dataframe(kraken)
         if historical_data is not None:
-            print("\nPrimeras 5 filas del DataFrame:")
-            print(historical_data.head())
-            print(f"\nTipos de datos:\n{historical_data.dtypes}")
+            # 💡 Llamamos a la nueva función
+            processed_data = preprocess_data_for_time_bias(historical_data)
+            
+            print("\nDataFrame después del Hito 3:")
+            print(processed_data[['timestamp', 'hour_utc', 'candle_range', 'volume']].head())
+            print(f"\nTipo de la columna 'timestamp' después de la localización: {processed_data['timestamp'].dtype}")
