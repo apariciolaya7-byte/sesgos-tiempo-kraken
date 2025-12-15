@@ -217,38 +217,36 @@ def analyze_gross_return(df):
     else:
         print("Sesgo de Dirección en la KILL ZONE: Neutro.")
 
-if __name__ == '__main__':
-    # Define la fecha de inicio para el backtesting (Aproximadamente 6 meses de datos)
-    # Fecha: 14 de junio de 2025 (asumiendo que hoy es 14 de diciembre de 2025)
+def main():
+    # Define la fecha de inicio para el backtesting (6 meses)
     START_DATE = '2025-06-14' 
     
-    # Paso 1: Inicializar la conexión
+    # 1. Inicializar la conexión
     kraken = initialize_kraken_exchange()
 
     if kraken:
-        # Paso 2: Descargar los datos OHLCV (¡Ahora llamando a la función histórica!)
+        # 2. Descargar los datos OHLCV
         historical_data = fetch_historical_data(kraken, start_date_str=START_DATE) 
         
-        # Paso 3: Verificar que la descarga fue exitosa antes de continuar
         if historical_data is not None and not historical_data.empty: 
             print(f"\nTotal de velas para Backtesting: {len(historical_data)}")
 
-            # Paso 4: Pre-procesar (Hito 3)
+            # 3. Pre-procesar (Hito 3)
             processed_data = preprocess_data_for_time_bias(historical_data)
+            
+            # 4. Marcar y Analizar
+            data_with_zones = mark_kill_zones(processed_data)
+            analyze_gross_return(data_with_zones) # Retorno Bruto
+            analyze_time_bias(data_with_zones) # Volumen/Rango Comparativo
+            analyze_all_hours(processed_data) # Exporta el CSV de análisis detallado
 
-            # PASO 1: Marcar las Kill Zones con las NUEVAS CONSTANTES (14-18 UTC)
-            data_with_zones = mark_kill_zones(processed_data)
-            
-            # PASO 2: Ejecutar el análisis de retorno
-            analyze_gross_return(data_with_zones)
-            
-            # Paso 5: Marcar y Analizar (Hito 4)
-            data_with_zones = mark_kill_zones(processed_data)
-            analyze_time_bias(data_with_zones)
-            analyze_all_hours(processed_data)
-            
-            # Una pequeña vista del etiquetado:
-            print("\nVelas etiquetadas (primeras 8):")
-            print(data_with_zones[['hour_utc', 'is_kill_zone', 'volume']].head(8))
         else:
-            print("No se pudo obtener datos históricos o el DataFrame está vacío. Deteniendo el análisis.")
+            print("No se pudo obtener datos históricos. Deteniendo el análisis.")
+            
+    else:
+        print("Fallo la inicialización de Kraken. Verifique credenciales.")
+
+
+if __name__ == '__main__':
+    # Simplemente llama a la función principal
+    main()
