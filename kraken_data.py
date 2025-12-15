@@ -100,14 +100,66 @@ def preprocess_data_for_time_bias(df):
     return df.reset_index(drop=True)
 
 
+# Tiempos de ejemplo para la superposición Londres/Nueva York:
+# La Kill Zone es de 08:00 a 12:00 UTC (4 horas de alta volatilidad)
+KILL_ZONE_START = 8
+KILL_ZONE_END = 12
+
+def mark_kill_zones(df):
+    """
+    Marca las velas que caen dentro de la Kill Zone de alta liquidez.
+    """
+    # 1. Crear una columna booleana que es True si la hora está dentro del rango
+    df['is_kill_zone'] = (df['hour_utc'] >= KILL_ZONE_START) & (df['hour_utc'] < KILL_ZONE_END)
+    
+    print("✅ Kill Zones marcadas en el DataFrame.")
+    return df
+
+def analyze_time_bias(df):
+    """
+    Calcula el volumen promedio y el rango promedio dentro y fuera de la Kill Zone.
+    """
+    
+    # Agrupación por la nueva columna booleana:
+    bias_analysis = df.groupby('is_kill_zone').agg(
+        avg_volume=('volume', 'mean'),
+        avg_range=('candle_range', 'mean')
+    )
+    
+    # Renombrar los índices para mayor claridad
+    bias_analysis = bias_analysis.rename(index={
+        True: 'KILL_ZONE (Alta Liquidez)',
+        False: 'LOW_LIQUIDITY (Fuera de Zona)'
+    })
+    
+    print("\n📊 Análisis de Sesgo de Tiempo (Basado en la muestra de 24h):")
+    print("---------------------------------------------------------")
+    print(bias_analysis)
+    print("---------------------------------------------------------")
+    
+    return bias_analysis
+
 if __name__ == '__main__':
+    # Paso 1: Inicializar la conexión
     kraken = initialize_kraken_exchange()
+
     if kraken:
-        historical_data = fetch_data_to_dataframe(kraken)
-        if historical_data is not None:
-            # 💡 Llamamos a la nueva función
+        # Paso 2: Descargar los datos OHLCV
+        # historical_data SE DEFINE AQUÍ
+        historical_data = fetch_data_to_dataframe(kraken) 
+        
+        # Paso 3: Verificar que la descarga fue exitosa antes de continuar
+        if historical_data is not None: 
+            
+            # Paso 4: Pre-procesar (Hito 3)
             processed_data = preprocess_data_for_time_bias(historical_data)
             
-            print("\nDataFrame después del Hito 3:")
-            print(processed_data[['timestamp', 'hour_utc', 'candle_range', 'volume']].head())
-            print(f"\nTipo de la columna 'timestamp' después de la localización: {processed_data['timestamp'].dtype}")
+            # Paso 5: Marcar y Analizar (Hito 4)
+            data_with_zones = mark_kill_zones(processed_data)
+            analyze_time_bias(data_with_zones)
+            
+            # Una pequeña vista del etiquetado:
+            print("\nVelas etiquetadas (primeras 8):")
+            print(data_with_zones[['hour_utc', 'is_kill_zone', 'volume']].head(8))
+        else:
+            print("No se pudo obtener datos históricos. Deteniendo el análisis.")
