@@ -164,7 +164,7 @@ def analyze_time_bias(df):
     
     return bias_analysis
 
-def analyze_all_hours(df):
+def analyze_all_hours(df, symbol='BTC/USD'): # <--- AQUÍ DEBE RECIBIR EL PARÁMETRO
     """Calcula el volumen y rango promedio para CADA hora del día y guarda el resultado."""
     hourly_analysis = df.groupby('hour_utc').agg(
         avg_volume=('volume', 'mean'),
@@ -175,7 +175,8 @@ def analyze_all_hours(df):
     # -----------------
     # AÑADIR EXPORTACIÓN CSV
     # -----------------
-    report_filename = 'time_bias_hourly_analysis.csv'
+    # Usa el parámetro 'symbol' que recibe la función
+    report_filename = f'{symbol.replace("/", "_")}_time_bias_hourly_analysis.csv' 
     hourly_analysis.to_csv(report_filename)
     print(f"\n✅ Reporte de Análisis por Hora guardado en: {report_filename}")
 
@@ -186,7 +187,7 @@ def analyze_all_hours(df):
     peak_hour = hourly_analysis.iloc[0].name
     print(f"Hora Pico de Volumen Real (UTC): {peak_hour}:00")
     
-    return hourly_analysis # Retornar el DF para su uso si es necesario
+    return hourly_analysis
 
 def analyze_gross_return(df):
     """
@@ -218,35 +219,60 @@ def analyze_gross_return(df):
         print("Sesgo de Dirección en la KILL ZONE: Neutro.")
 
 def main():
-    # Define la fecha de inicio para el backtesting (6 meses)
+    # ---------------------------------------------
+    # 1. PARAMETRIZACIÓN GLOBAL
+    # ---------------------------------------------
+    # Lista de activos para el backtesting
+    TARGET_ASSETS = [
+        'BTC/USD', 'ADA/USD', 'XRP/USD', 'SOL/USD', 
+        'ETH/USD', 'LTC/USD', 'DOT/USD', 'BCH/USD', 'UNI/USD', 'LINK/USD'
+    ]
+    TIME_FRAME = '1h'
     START_DATE = '2025-06-14' 
+    # ---------------------------------------------
     
-    # 1. Inicializar la conexión
+    # 1. Inicializar la conexión una sola vez
     kraken = initialize_kraken_exchange()
 
-    if kraken:
-        # 2. Descargar los datos OHLCV
-        historical_data = fetch_historical_data(kraken, start_date_str=START_DATE) 
+    if not kraken:
+        print("Fallo la inicialización de Kraken. Deteniendo el proceso.")
+        return
+
+    # 2. Bucle principal para ITERAR sobre cada activo
+    print(f"\n=======================================================")
+    print(f"  INICIANDO BACKTESTING AUTOMATIZADO PARA {len(TARGET_ASSETS)} ACTIVOS")
+    print(f"=======================================================\n")
+    
+    for symbol in TARGET_ASSETS:
+        TARGET_SYMBOL = symbol # Establece el símbolo actual
+        
+        print(f"\n--- [ {TARGET_SYMBOL} ] Iniciando análisis...")
+        
+        # 3. Descargar los datos OHLCV para el activo actual
+        historical_data = fetch_historical_data(
+            kraken, 
+            symbol=TARGET_SYMBOL, 
+            timeframe=TIME_FRAME, 
+            start_date_str=START_DATE
+        ) 
         
         if historical_data is not None and not historical_data.empty: 
-            print(f"\nTotal de velas para Backtesting: {len(historical_data)}")
+            print(f"\nTotal de velas para Backtesting de {TARGET_SYMBOL}: {len(historical_data)}")
 
-            # 3. Pre-procesar (Hito 3)
+            # 4. Procesamiento y Análisis
             processed_data = preprocess_data_for_time_bias(historical_data)
-            
-            # 4. Marcar y Analizar
             data_with_zones = mark_kill_zones(processed_data)
-            analyze_gross_return(data_with_zones) # Retorno Bruto
-            analyze_time_bias(data_with_zones) # Volumen/Rango Comparativo
-            analyze_all_hours(processed_data) # Exporta el CSV de análisis detallado
+            
+            # 5. Reporte de Consola y Generación de CSV
+            analyze_gross_return(data_with_zones) 
+            analyze_time_bias(data_with_zones) 
+            analyze_all_hours(processed_data, symbol=TARGET_SYMBOL) # Genera el CSV
 
         else:
-            print("No se pudo obtener datos históricos. Deteniendo el análisis.")
+            print(f"!!! ADVERTENCIA: No se pudo obtener datos históricos para {TARGET_SYMBOL}. Saltando.")
             
-    else:
-        print("Fallo la inicialización de Kraken. Verifique credenciales.")
+        print(f"--- [ {TARGET_SYMBOL} ] Análisis Finalizado.\n")
 
 
 if __name__ == '__main__':
-    # Simplemente llama a la función principal
     main()
