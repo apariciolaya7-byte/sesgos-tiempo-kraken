@@ -189,34 +189,49 @@ def analyze_all_hours(df, symbol='BTC/USD'): # <--- AQUÍ DEBE RECIBIR EL PARÁM
     
     return hourly_analysis
 
+# NUEVO INDICADOR: Devolver el Retorno Bruto (GR) de la Kill Zone
 def analyze_gross_return(df):
-    """
-    Calcula el movimiento promedio (Open a Close) para estimar el Retorno Bruto promedio.
-    """
-    # 1. Calcular el movimiento de la vela (Cierre - Apertura)
-    df['candle_return'] = df['close'] - df['open']
+    """Calcula el Retorno Bruto Promedio (GR) por vela en la Kill Zone."""
     
-    # 2. Agrupar el retorno por Kill Zone
-    return_analysis = df.groupby('is_kill_zone')['candle_return'].mean()
+    # Calcular el cambio absoluto por vela
+    df['gross_return'] = df['close'] - df['open']
     
+    # -----------------------------------------------------------------
+    # CORRECCIÓN CRÍTICA: Filtrar por el valor booleano TRUE/FALSE
+    # -----------------------------------------------------------------
+    # 1. Calcular el retorno promedio en la Kill Zone (donde 'is_kill_zone' es True)
+    kill_zone_gr = df[df['is_kill_zone'] == True]['gross_return'].mean()
+    
+    # 2. Calcular el retorno promedio fuera de la Kill Zone (donde 'is_kill_zone' es False)
+    low_liquidity_gr = df[df['is_kill_zone'] == False]['gross_return'].mean()
+    
+    # Mostrar resultados en consola
     print("\n💰 Análisis de Retorno Bruto Promedio (por Vela):")
-    print("--------------------------------------------------")
+    print("-" * 50)
     
-    # El valor es el movimiento promedio de la vela en el tiempo de la Kill Zone
-    kill_zone_return = return_analysis.get(True, 0)
-    low_liquidity_return = return_analysis.get(False, 0)
+    # Manejo de NaN para evitar errores
+    if pd.isna(kill_zone_gr):
+        print(f"KILL ZONE (14:00 a 18:00 UTC): $nan (Movimiento promedio)")
+        sesgo = "Neutro (Error de Cálculo o Datos insuficientes)."
+        return 0.0 # Devolver 0.0 en caso de error para que el if/elif del main no falle
+        
+    # Continuación si no es NaN
+    print(f"KILL ZONE (14:00 a 18:00 UTC): ${kill_zone_gr:.2f} (Movimiento promedio)")
+    print(f"LOW LIQUIDITY (Otras Horas): ${low_liquidity_gr:.2f} (Movimiento promedio)")
+    print("-" * 50)
     
-    print(f"KILL ZONE ({KILL_ZONE_START:02d}:00 a {KILL_ZONE_END:02d}:00 UTC): ${kill_zone_return:.2f} (Movimiento promedio)")
-    print(f"LOW LIQUIDITY (Otras Horas): ${low_liquidity_return:.2f} (Movimiento promedio)")
-    print("--------------------------------------------------")
-    
-    # Evaluar el sesgo de dirección: ¿sube o baja?
-    if kill_zone_return > 0:
-        print("Sesgo de Dirección en la KILL ZONE: Ligeramente Alcista (el precio tiende a subir).")
-    elif kill_zone_return < 0:
-        print("Sesgo de Dirección en la KILL ZONE: Ligeramente Bajista (el precio tiende a bajar).")
+    if kill_zone_gr > 0:
+        sesgo = "Ligeramente Alcista (el precio tiende a subir)."
+    elif kill_zone_gr < 0:
+        sesgo = "Ligeramente Bajista (el precio tiende a bajar)."
     else:
-        print("Sesgo de Dirección en la KILL ZONE: Neutro.")
+        sesgo = "Neutro."
+        
+    print(f"Sesgo de Dirección en la KILL ZONE: {sesgo}")
+    
+    # DEVUELVE el indicador clave: Retorno Bruto de la Kill Zone
+    return kill_zone_gr
+
 
 def main():
     # ---------------------------------------------
@@ -262,6 +277,17 @@ def main():
             # 4. Procesamiento y Análisis
             processed_data = preprocess_data_for_time_bias(historical_data)
             data_with_zones = mark_kill_zones(processed_data)
+
+            # CAPTURA EL NUEVO INDICADOR DE SESGO HORARIO
+            time_bias_score = analyze_gross_return(data_with_zones)
+
+            # Ahora podemos usar 'time_bias_score' para la lógica del bot
+            if time_bias_score > 0.05: # Umbral (ej: 5 centavos)
+                print(f"** INDICADOR CLAVE: SESGO ALCISTA FUERTE (+{time_bias_score:.2f}) **")
+            elif time_bias_score < -0.05:
+                print(f"** INDICADOR CLAVE: SESGO BAJISTA FUERTE ({time_bias_score:.2f}) **")
+            else:
+                print(f"** INDICADOR CLAVE: SESGO NEUTRO ({time_bias_score:.2f}) **")
             
             # 5. Reporte de Consola y Generación de CSV
             analyze_gross_return(data_with_zones) 
