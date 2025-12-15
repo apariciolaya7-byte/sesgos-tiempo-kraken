@@ -10,6 +10,10 @@ on:
 jobs:
   run-analysis:
     runs-on: ubuntu-latest
+
+    # NUEVO BLOQUE DE PERMISOS:
+    permissions:
+      contents: write # Esto le da permiso al token para hacer commit y push
     
     steps:
     - name: Checkout code
