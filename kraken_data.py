@@ -5,6 +5,14 @@ import pandas as pd
 import pytz
 from datetime import datetime
 import time
+import ta.volatility
+
+# REGISTRO GLOBAL DE POSICIONES ABIERTAS (Manejo de estado)
+OPEN_POSITIONS = []
+CLOSED_TRADES = [] # <-- AÑADIDO: Para guardar los resultados de PnL
+# NUEVO: Para almacenar los resultados totales de cada corrida de optimización
+OPTIMIZATION_RESULTS = []
+
 
 # 1. Cargar variables del archivo .env
 load_dotenv()
@@ -233,71 +241,368 @@ def analyze_gross_return(df):
     return kill_zone_gr
 
 
+
+def calculate_atr(df, window=20): 
+    """
+    Calcula el Average True Range (ATR) para la volatilidad, utilizando una ventana
+    de N velas (por defecto 20) para el cálculo del valor final.
+    """
+    # Usamos la ventana definida (ahora 20) para el cálculo del ATR.
+    # Esto asegura que el valor ATR de la última vela refleje la volatilidad de las 20 velas anteriores.
+    
+    # Asegúrate de que las columnas 'high', 'low', 'close' estén presentes
+    df['atr'] = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=window)
+    
+    # Devolver el ATR de la última vela (este valor ya es el resultado del cálculo de 20 periodos)
+    return df['atr'].iloc[-1]
+
+def calculate_exit_levels(entry_price, atr_value, direction):
+    """Calcula los niveles de Stop Loss y Take Profit."""
+    
+    # Parámetros de Riesgo/Recompensa
+    SL_MULTIPLIER = 1.5  # Asumir 1.5x el ATR de riesgo
+    TP_MULTIPLIER = 3.0  # Asumir 3.0x el ATR de recompensa (R:R 1:2)
+    
+    risk_amount = atr_value * SL_MULTIPLIER
+    profit_amount = atr_value * TP_MULTIPLIER
+
+    if direction == "LONG (COMPRA)":
+        # SL: Por debajo del precio de entrada
+        stop_loss = entry_price - risk_amount
+        # TP: Por encima del precio de entrada
+        take_profit = entry_price + profit_amount
+    
+    elif direction == "SHORT (VENTA)":
+        # SL: Por encima del precio de entrada
+        stop_loss = entry_price + risk_amount
+        # TP: Por debajo del precio de entrada
+        take_profit = entry_price - profit_amount
+    
+    else:
+        # En caso neutral, no hay niveles
+        return None, None
+    
+    return round(stop_loss, 2), round(take_profit, 2)
+
+
+def monitor_and_close_positions(current_price_data):
+    """
+    Simula la comprobación de posiciones abiertas contra SL/TP/Time Exit, y calcula PnL.
+    current_price_data: Diccionario con precios actuales (ej: {'BTC/USD': 87087.04, ...})
+    """
+    global OPEN_POSITIONS, CLOSED_TRADES # Asegurarse de que CLOSED_TRADES sea global
+
+    print("\n--- INICIANDO MONITOREO DE POSICIONES ---")
+    
+    # Recorrer las posiciones de atrás hacia adelante para eliminar sin problemas
+    for i in range(len(OPEN_POSITIONS) - 1, -1, -1):
+        pos = OPEN_POSITIONS[i]
+        symbol = pos['symbol']
+        
+        current_price = current_price_data.get(symbol)
+        
+        if current_price is None:
+            print(f"!!! ADVERTENCIA: Precio actual no encontrado para {symbol}. Saltando monitoreo.")
+            continue
+            
+        exit_reason = None
+        close_price = None # Usaremos esta variable para el cálculo de PnL
+
+        # Lógica de CIERRE LONG
+        if pos['direction'] == 'LONG (COMPRA)':
+            if current_price >= pos['take_profit']:
+                exit_reason = "TAKE PROFIT (TP)"
+                close_price = pos['take_profit'] # ¡USAR NIVEL FIJO!
+            elif current_price <= pos['stop_loss']:
+                exit_reason = "STOP LOSS (SL)"
+                close_price = pos['stop_loss'] # ¡USAR NIVEL FIJO!
+        
+        # Lógica de CIERRE SHORT
+        elif pos['direction'] == 'SHORT (VENTA)':
+            if current_price <= pos['take_profit']: 
+                exit_reason = "TAKE PROFIT (TP)"
+                close_price = pos['take_profit'] # ¡USAR NIVEL FIJO!
+            elif current_price >= pos['stop_loss']: 
+                exit_reason = "STOP LOSS (SL)"
+                close_price = pos['stop_loss'] # ¡USAR NIVEL FIJO!
+
+        # **************************************************
+        # NUEVO: LÓGICA DE CIERRE POR TIEMPO (TIME EXIT)
+        # **************************************************
+        # Si no cerró por precio, se cierra por tiempo al precio actual simulado
+        if exit_reason is None:
+            exit_reason = "TIME EXIT (END OF KZ)"
+            close_price = current_price # Usar el precio simulado como precio de cierre
+            
+        # Si hay una razón de salida (TP, SL o Time Exit), cerrar la posición
+        if exit_reason:
+            
+            # Calcular PnL (Ganancia/Pérdida)
+            pnl_usd = (close_price - pos['entry_price']) * pos['amount_base']
+            
+            # Si fue un SHORT, el cálculo debe ser inverso 
+            if pos['direction'] == 'SHORT (VENTA)':
+                pnl_usd = -pnl_usd 
+
+            pnl_status = "GANANCIA" if pnl_usd > 0 else "PÉRDIDA"
+            
+            print(f"✅ CIERRE {symbol} | Motivo: {exit_reason} | PnL: ${pnl_usd:.2f} ({pnl_status})")
+            
+            # Mover la posición a la lista de cerradas y eliminar de la lista abierta
+            pos['status'] = 'CLOSED'
+            pos['exit_price'] = close_price 
+            pos['exit_reason'] = exit_reason
+            pos['pnl_usd'] = pnl_usd 
+            
+            CLOSED_TRADES.append(OPEN_POSITIONS.pop(i))
+            
+    if not OPEN_POSITIONS:
+        print("--- NO HAY POSICIONES ABIERTAS PENDIENTES ---")
+    else:
+        print(f"--- {len(OPEN_POSITIONS)} POSICIONES ABIERTAS PENDIENTES ---")
+
+
+# ----------------------------------------------------
+# NUEVA FUNCIÓN: SIMULACIÓN DE ENTRADA DE TRADING
+# ----------------------------------------------------
+
+def execute_trade_simulation(symbol, bias_score, atr_multiplier_value, historical_data): 
+    """
+    Simula una orden de mercado con cálculo de Stop Loss y Take Profit.
+    Ahora incluye filtro de robustez ATR Mín/Máx.
+    """
+    global OPEN_POSITIONS
+
+    # 1. Obtener precios y calcular ATR
+    try:
+        entry_price = historical_data['close'].iloc[-1] 
+        # Se llama a la función ATR, que ahora debe tener la lógica de las últimas 20 velas
+        atr_value = calculate_atr(historical_data.copy())
+        open_time = historical_data.index[-1]
+        
+        # CÁLCULO DEL UMBRAL DINÁMICO
+        dynamic_threshold = atr_value * atr_multiplier_value 
+
+    except Exception as e:
+        print(f"!!! ERROR al calcular ATR/Precios para {symbol}: {e}")
+        return
+    
+    # ----------------------------------------------------
+    # NUEVO FILTRO DE ROBUSTEZ: ATR Mínimo y Máximo
+    # ----------------------------------------------------
+    # Se establecen límites de sentido común para evitar trades en volatilidad nula o extrema.
+    MIN_ATR_USD = 0.05  
+    MAX_ATR_USD = 100.0 
+
+    if atr_value < MIN_ATR_USD:
+        print(f"🛑 DECISIÓN: MANTENERSE AL MARGEN (VOLATILIDAD MUERTA). ATR (${atr_value:.2f}) < Umbral Mínimo (${MIN_ATR_USD:.2f}).")
+        return
+
+    if atr_value > MAX_ATR_USD:
+        print(f"🛑 DECISIÓN: MANTENERSE AL MARGEN (VOLATILIDAD EXTREMA). ATR (${atr_value:.2f}) > Umbral Máximo (${MAX_ATR_USD:.2f}).")
+        return
+    # ----------------------------------------------------
+
+    # 2. Lógica de Decisión (Identificación de Dirección) - ÚNICA VEZ
+    if bias_score > dynamic_threshold:
+        direction = "LONG (COMPRA)"
+    elif bias_score < -dynamic_threshold:
+        direction = "SHORT (VENTA)"
+    else:
+        direction = "NEUTRAL"
+        print(f"🛑 DECISIÓN: MANTENERSE AL MARGEN (SESGO NEUTRO). Umbral requerido: ${dynamic_threshold:.2f}")
+        return
+        
+    # 3. Calcular los niveles de salida 
+    stop_loss, take_profit = calculate_exit_levels(entry_price, atr_value, direction)
+
+    # 4. Simulación y Reporte de la Orden
+    amount_usd = 100.0  # Invertir 100 USD
+    amount_base = amount_usd / entry_price
+    
+    print(f"💰 DECISIÓN: INICIAR {direction}")
+    print("-" * 50)
+    print(f"--- ORDEN SIMULADA ---")
+    print(f" Activo: {symbol}")
+    print(f" Dirección: {direction}")
+    print(f" Score (GR): ${bias_score:.2f}")
+    print(f" Precio Entrada: ${entry_price:.2f}")
+    print(f" Cantidad Base: {amount_base:.5f} {symbol.split('/')[0]}")
+    print(f" Volatilidad (ATR): ${atr_value:.2f}")
+    print(f" ** STOP LOSS (SL): ${stop_loss:.2f} **")
+    print(f" ** TAKE PROFIT (TP): ${take_profit:.2f} **")
+    print("-" * 50)
+
+    # 5. Guardar la posición
+    new_position = {
+        'symbol': symbol,
+        'direction': direction,
+        'entry_price': entry_price,
+        'amount_base': amount_base,
+        'stop_loss': stop_loss,
+        'take_profit': take_profit,
+        'status': 'OPEN',
+        'open_time': open_time 
+    }
+    OPEN_POSITIONS.append(new_position)
+
+
+
+# Modificamos la función existente para que no imprima, sino que devuelva las métricas
+def calculate_metrics():
+    """Calcula las métricas de rendimiento de la corrida actual."""
+    global CLOSED_TRADES
+    if not CLOSED_TRADES:
+        return 0, 0, 0.0, 0 # Trades, Wins, Win Rate, PNL
+        
+    df_results = pd.DataFrame(CLOSED_TRADES)
+    total_pnl = df_results['pnl_usd'].sum()
+    win_trades = len(df_results[df_results['pnl_usd'] > 0])
+    total_trades = len(df_results)
+    win_rate = (win_trades / total_trades) * 100 if total_trades > 0 else 0
+    
+    return total_trades, win_trades, win_rate, total_pnl
+
+# Función para registrar la corrida
+def record_optimization_result(multiplier):
+    """Guarda los resultados de la corrida actual en el registro global."""
+    global OPTIMIZATION_RESULTS
+    total_trades, win_trades, win_rate, total_pnl = calculate_metrics()
+    
+    OPTIMIZATION_RESULTS.append({
+        'ATR_Multiplier': multiplier,
+        'Total_Trades': total_trades,
+        'Win_Trades': win_trades,
+        'Win_Rate': f"{win_rate:.2f}%",
+        'PNL_Total': round(total_pnl, 2)
+    })
+
+# Función para imprimir el reporte final de todas las corridas
+def print_optimization_report():
+    """Imprime una tabla comparativa de los resultados de optimización."""
+    global OPTIMIZATION_RESULTS
+    
+    if not OPTIMIZATION_RESULTS:
+        print("\n=== REPORTE DE OPTIMIZACIÓN FINAL ===")
+        print("No se registraron corridas de backtesting.")
+        return
+        
+    df_report = pd.DataFrame(OPTIMIZATION_RESULTS)
+    
+    # Encontrar el mejor resultado basado en PNL Total
+    best_result = df_report.loc[df_report['PNL_Total'].idxmax()]
+    
+    print("\n\n=======================================================")
+    print("=== REPORTE DE OPTIMIZACIÓN FINAL (ATR Multiplier) ===")
+    print("=======================================================")
+    print(df_report.to_markdown(index=False))
+    print("-------------------------------------------------------")
+    print(f"🥇 MEJOR CORRIDA (PNL): Multiplicador {best_result['ATR_Multiplier']:.2f} con PNL ${best_result['PNL_Total']:.2f}")
+    print("=======================================================")  
+
+
 def main():
     # ---------------------------------------------
     # 1. PARAMETRIZACIÓN GLOBAL
     # ---------------------------------------------
-    # Lista de activos para el backtesting
     TARGET_ASSETS = [
         'BTC/USD', 'ADA/USD', 'XRP/USD', 'SOL/USD', 
         'ETH/USD', 'LTC/USD', 'DOT/USD', 'BCH/USD', 'UNI/USD', 'LINK/USD'
     ]
     TIME_FRAME = '1h'
     START_DATE = '2025-06-14' 
+    
+    # NUEVO: Rango de valores a probar para el multiplicador de ATR (Filtro)
+    ATR_MULTIPLIERS_TO_TEST = [0.05, 0.10, 0.15, 0.20] 
+    
     # ---------------------------------------------
     
-    # 1. Inicializar la conexión una sola vez
     kraken = initialize_kraken_exchange()
-
     if not kraken:
         print("Fallo la inicialización de Kraken. Deteniendo el proceso.")
         return
 
-    # 2. Bucle principal para ITERAR sobre cada activo
-    print(f"\n=======================================================")
-    print(f"  INICIANDO BACKTESTING AUTOMATIZADO PARA {len(TARGET_ASSETS)} ACTIVOS")
-    print(f"=======================================================\n")
-    
-    for symbol in TARGET_ASSETS:
-        TARGET_SYMBOL = symbol # Establece el símbolo actual
+    # --- INICIO DEL BUCLE DE OPTIMIZACIÓN ---
+    for multiplier in ATR_MULTIPLIERS_TO_TEST:
         
-        print(f"\n--- [ {TARGET_SYMBOL} ] Iniciando análisis...")
+        # 1. Resetear el estado para esta corrida
+        global OPEN_POSITIONS, CLOSED_TRADES
+        OPEN_POSITIONS = []
+        CLOSED_TRADES = [] 
         
-        # 3. Descargar los datos OHLCV para el activo actual
-        historical_data = fetch_historical_data(
-            kraken, 
-            symbol=TARGET_SYMBOL, 
-            timeframe=TIME_FRAME, 
-            start_date_str=START_DATE
-        ) 
+        print(f"\n=======================================================")
+        print(f"=== CORRIDA DE OPTIMIZACIÓN: ATR Multiplicador = {multiplier:.2f} ===")
+        print(f"=======================================================\n")
         
-        if historical_data is not None and not historical_data.empty: 
-            print(f"\nTotal de velas para Backtesting de {TARGET_SYMBOL}: {len(historical_data)}")
+        # 2. Bucle interno para ITERAR sobre cada activo (Lógica de Apertura)
+        for symbol in TARGET_ASSETS:
+            TARGET_SYMBOL = symbol # Asignación de símbolo
+        
+            # *************************************************************
+            # * AHORA, TODA ESTA LÓGICA ESTÁ DENTRO DEL BUCLE INTERNO     *
+            # *************************************************************
+            
+            print(f"\n--- [ {TARGET_SYMBOL} ] Iniciando análisis...")
+            
+            # 3. Descargar los datos OHLCV para el activo actual
+            historical_data = fetch_historical_data(
+                kraken, 
+                symbol=TARGET_SYMBOL, 
+                timeframe=TIME_FRAME, 
+                start_date_str=START_DATE
+            ) 
+            
+            if historical_data is not None and not historical_data.empty: 
+                
+                # 4. Procesamiento y Análisis
+                processed_data = preprocess_data_for_time_bias(historical_data)
+                data_with_zones = mark_kill_zones(processed_data)
 
-            # 4. Procesamiento y Análisis
-            processed_data = preprocess_data_for_time_bias(historical_data)
-            data_with_zones = mark_kill_zones(processed_data)
+                # 5. CÁLCULO DEL SESGO
+                time_bias_score = analyze_gross_return(data_with_zones)
 
-            # CAPTURA EL NUEVO INDICADOR DE SESGO HORARIO
-            time_bias_score = analyze_gross_return(data_with_zones)
+                # Impresión de sesgo...
+                
+                # 6. PASO CLAVE: Ejecutar la simulación
+                execute_trade_simulation(
+                    TARGET_SYMBOL, 
+                    time_bias_score, 
+                    multiplier, # <--- Correcto: usa el multiplicador actual
+                    historical_data
+                )
 
-            # Ahora podemos usar 'time_bias_score' para la lógica del bot
-            if time_bias_score > 0.05: # Umbral (ej: 5 centavos)
-                print(f"** INDICADOR CLAVE: SESGO ALCISTA FUERTE (+{time_bias_score:.2f}) **")
-            elif time_bias_score < -0.05:
-                print(f"** INDICADOR CLAVE: SESGO BAJISTA FUERTE ({time_bias_score:.2f}) **")
+                # 7. Reporte de Consola y Generación de CSV
+                analyze_time_bias(data_with_zones) 
+                analyze_all_hours(processed_data, symbol=TARGET_SYMBOL)
+
             else:
-                print(f"** INDICADOR CLAVE: SESGO NEUTRO ({time_bias_score:.2f}) **")
+                print(f"!!! ADVERTENCIA: No se pudo obtener datos históricos para {TARGET_SYMBOL}. Saltando.")
+                
+            print(f"--- [ {TARGET_SYMBOL} ] Análisis Finalizado.\n")
             
-            # 5. Reporte de Consola y Generación de CSV
-            analyze_gross_return(data_with_zones) 
-            analyze_time_bias(data_with_zones) 
-            analyze_all_hours(processed_data, symbol=TARGET_SYMBOL) # Genera el CSV
+        # *************************************************************
+        # * FIN DEL BUCLE INTERNO (for symbol in TARGET_ASSETS)       *
+        # *************************************************************
 
-        else:
-            print(f"!!! ADVERTENCIA: No se pudo obtener datos históricos para {TARGET_SYMBOL}. Saltando.")
+
+        # 3. Simulación de Monitoreo y Cierre (CORREGIDO: Fuera del bucle interno)
+        simulated_current_prices = {
+           'BTC/USD': 87087.04, 'ETH/USD': 2856.80, 
+           'SOL/USD': 122.27, 'BCH/USD': 552.59,
+           'LTC/USD': 74.90, 'ADA/USD': 0.50,
+           'XRP/USD': 0.55, 'DOT/USD': 6.00, 'UNI/USD': 10.00, 'LINK/USD': 15.00
+        }
+
+        print("--- INICIANDO MONITOREO DE POSICIONES ---")
+        monitor_and_close_positions(simulated_current_prices)
             
-        print(f"--- [ {TARGET_SYMBOL} ] Análisis Finalizado.\n")
+        # 4. Registrar los resultados de la corrida 
+        record_optimization_result(multiplier) 
+
+    # --- FIN DEL BUCLE DE OPTIMIZACIÓN ---
+    
+    # 5. Reporte de Optimización Final (FUERA DE TODOS LOS BUCLES)
+    print_optimization_report()          
 
 
 if __name__ == '__main__':

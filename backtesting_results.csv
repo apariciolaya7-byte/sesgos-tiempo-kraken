@@ -1,0 +1,2 @@
+symbol,direction,entry_price,amount_base,stop_loss,take_profit,status,exit_price,exit_reason,pnl_usd
+LTC/USD,SHORT (VENTA),77.35,1.292824822236587,78.42,75.2,CLOSED,74.9,TAKE PROFIT (TP),3.1674208144796236
