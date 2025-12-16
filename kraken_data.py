@@ -6,12 +6,12 @@ import pytz
 from datetime import datetime
 import time
 import ta.volatility
+import json
+
 
 # REGISTRO GLOBAL DE POSICIONES ABIERTAS (Manejo de estado)
 OPEN_POSITIONS = []
 CLOSED_TRADES = [] # <-- AÑADIDO: Para guardar los resultados de PnL
-# NUEVO: Para almacenar los resultados totales de cada corrida de optimización
-OPTIMIZATION_RESULTS = []
 
 
 # 1. Cargar variables del archivo .env
@@ -34,81 +34,109 @@ def initialize_kraken_exchange():
         print(f"❌ Error al inicializar Kraken: {e}")
         return None
 
-# 3. Prueba la conexión (opcional, pero útil)
-if __name__ == '__main__':
-    kraken = initialize_kraken_exchange()
-    if kraken:
-        # ccxt tiene una función para verificar si la autenticación funciona
-        # Esto usará un 'endpoint' privado y requiere que las claves sean válidas.
-        try:
-             # Por ejemplo, obteniendo información de la cuenta (solo si las claves son válidas)
-            balance = kraken.fetch_balance()
-            print("✅ Autenticación exitosa. Saldo cargado.")
-        except Exception as e:
-            # Si el error es por claves inválidas, te lo indicará.
-            print(f"⚠️ Atención: Las claves de API son incorrectas o no tienen permisos.")
-            print(f"Error detallado: {e}")
 
+# Nombre del archivo para guardar las posiciones abiertas
+POSITIONS_FILE = 'open_positions.json'
 
-MAX_LIMIT = 720 
-
-def fetch_historical_data(exchange, symbol='BTC/USD', timeframe='1h', start_date_str='YYYY-MM-DD'):
-    """
-    Descarga datos OHLCV históricos en bloques hasta la fecha de inicio.
-    """
-    
-    # 1. Convertir fecha de inicio (Ej: '2025-06-01') a Timestamp UNIX (en milisegundos)
+def load_open_positions():
+    """Carga las posiciones abiertas desde un archivo JSON al inicio."""
+    global OPEN_POSITIONS
     try:
-        since_timestamp = exchange.parse8601(start_date_str + 'T00:00:00Z')
-    except Exception:
-        print("❌ Error: Formato de fecha de inicio inválido. Use 'YYYY-MM-DD'.")
+        if os.path.exists(POSITIONS_FILE):
+            with open(POSITIONS_FILE, 'r') as f:
+                data = json.load(f)
+                
+                # Convertir los timestamps cargados a objetos datetime si es necesario, 
+                # o dejarlos como strings/timestamps para simplificar. 
+                # Por ahora, los dejamos tal cual.
+                OPEN_POSITIONS = data
+                print(f"✅ {len(OPEN_POSITIONS)} Posiciones abiertas cargadas desde {POSITIONS_FILE}.")
+                return
+    except Exception as e:
+        print(f"⚠️ Error al cargar posiciones: {e}. Iniciando con lista vacía.")
+    
+    OPEN_POSITIONS = []
+
+def save_open_positions():
+    """Guarda las posiciones abiertas en un archivo JSON."""
+    global OPEN_POSITIONS
+    try:
+        with open(POSITIONS_FILE, 'w') as f:
+            # Serializamos la lista de posiciones. Si tuviéramos objetos datetime,
+            # deberíamos convertirlos a string antes de serializar.
+            json.dump(OPEN_POSITIONS, f, indent=4)
+        # print(f"✅ Estado de posiciones guardado en {POSITIONS_FILE}.")
+    except Exception as e:
+        print(f"❌ Error al guardar posiciones: {e}")            
+
+        
+# NUEVA FUNCIÓN (o adaptación)
+def fetch_recent_data(exchange, symbol='BTC/USD', timeframe='1h', limit=50):
+    """
+    Descarga el número limitado (N) de velas históricas más recientes.
+    Recomendado para análisis en tiempo real.
+    """
+    try:
+        # ccxt por defecto usa el parámetro 'limit' para obtener las velas más recientes.
+        ohlcv = exchange.fetch_ohlcv(
+            symbol, 
+            timeframe, 
+            limit=limit 
+        )
+        
+        if not ohlcv:
+            print(f"!!! No se obtuvieron datos recientes para {symbol}.")
+            return None
+            
+        # 4. Compilación de Datos en un único DataFrame
+        headers = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
+        df = pd.DataFrame(ohlcv, columns=headers)
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        
+        return df
+        
+    except Exception as e:
+        print(f"❌ Error al obtener datos recientes para {symbol}: {e}")
         return None
     
-    all_ohlcv = []
-    current_timestamp = since_timestamp # Empezamos a buscar desde la fecha de inicio
 
-    print(f"Iniciando descarga histórica desde: {start_date_str}...")
-
-    # Bucle para descargar los datos por bloques
-    while True:
-        try:
-            # 2. Hacemos la llamada con un límite de velas
-            ohlcv_chunk = exchange.fetch_ohlcv(
-                symbol, 
-                timeframe, 
-                since=current_timestamp, 
-                limit=MAX_LIMIT
-            )
-
-            # Si el chunk está vacío o el último bloque es muy pequeño, hemos terminado
-            if not ohlcv_chunk or len(ohlcv_chunk) < MAX_LIMIT:
-                all_ohlcv.extend(ohlcv_chunk)
-                print(f"✅ Descarga finalizada. Total de velas obtenidas: {len(all_ohlcv)}")
-                break
-
-            # 3. Guardar el bloque y actualizar el timestamp
-            all_ohlcv.extend(ohlcv_chunk)
-            
-            # El 'since' para la siguiente llamada debe ser la hora de la ÚLTIMA vela en este chunk
-            current_timestamp = ohlcv_chunk[-1][0] + 1 # +1 ms para no repetir la última vela
-
-            print(f"  -> Bloque descargado. Total actual: {len(all_ohlcv)}. Última vela: {datetime.fromtimestamp(current_timestamp / 1000).strftime('%Y-%m-%d %H:%M')}")
-            
-            # ¡CRÍTICO! Esperar para evitar el límite de frecuencia de la API.
-            time.sleep(exchange.rateLimit / 1000) 
-
-        except Exception as e:
-            print(f"❌ Error durante la descarga: {e}. Reintentando en 5 segundos...")
-            time.sleep(5)
-
-    # 4. Compilación de Datos en un único DataFrame
-    headers = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
-    df = pd.DataFrame(all_ohlcv, columns=headers)
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+def execute_live_trade(kraken, symbol, atr_multiplier=0.05, timeframe='1h', hours_to_analyze=50):
+    """
+    Ejecuta la estrategia de Sesgo de Tiempo en un activo específico. 
+    Obtiene los datos recientes (last N hours) para calcular el ATR y el Sesgo.
+    """
     
-    return df
-        
-        
+    print(f"\n--- [ LIVE TRADE: {symbol} ] Analizando...")
+    
+    # 1. Obtener Datos Recientes (Usando la nueva función de límite)
+    historical_data = fetch_recent_data(kraken, symbol, timeframe, limit=hours_to_analyze)
+
+    if historical_data is None or historical_data.empty:
+        print(f"!!! No hay datos recientes para {symbol}. Saltando.")
+        return
+
+    # 2. Análisis del Sesgo de Tiempo
+    processed_data = preprocess_data_for_time_bias(historical_data)
+    data_with_zones = mark_kill_zones(processed_data)
+    
+    # Calcula el puntaje de sesgo (Gross Return Score)
+    time_bias_score = analyze_gross_return(data_with_zones)
+
+    # 3. Decisión y Ejecución
+    # Llama a la función de simulación que contiene toda la lógica optimizada
+    execute_trade_simulation(
+        symbol, 
+        time_bias_score, 
+        atr_multiplier, 
+        historical_data
+    )
+    
+    # NOTA: Opcionalmente, puedes eliminar las llamadas a analyze_time_bias y analyze_all_hours
+    # de este punto para que la ejecución en vivo sea más limpia y rápida, 
+    # ya que solo son útiles para el reporte y análisis en backtesting.
+    
+    print(f"--- {symbol} | Sesgo: {time_bias_score:.2f} | Decisión Registrada. ---")    
+      
 
 def preprocess_data_for_time_bias(df):
     """
@@ -149,53 +177,6 @@ def mark_kill_zones(df):
     print("✅ Kill Zones marcadas en el DataFrame.")
     return df
 
-def analyze_time_bias(df):
-    """
-    Calcula el volumen promedio y el rango promedio dentro y fuera de la Kill Zone.
-    """
-    # Agrupación por la nueva columna booleana:
-
-    bias_analysis = df.groupby('is_kill_zone').agg(
-        avg_volume=('volume', 'mean'),
-        avg_range=('candle_range', 'mean')
-    )
-    # Renombrar los índices para mayor claridad
-    bias_analysis = bias_analysis.rename(index={
-        True: 'KILL_ZONE (Alta Liquidez)',
-        False: 'LOW_LIQUIDITY (Fuera de Zona)'
-    })
-    
-    print("\n📊 Análisis de Sesgo de Tiempo (Basado en la muestra de 24h):")
-    print("---------------------------------------------------------")
-    print(bias_analysis)
-    print("---------------------------------------------------------")
-    
-    return bias_analysis
-
-def analyze_all_hours(df, symbol='BTC/USD'): # <--- AQUÍ DEBE RECIBIR EL PARÁMETRO
-    """Calcula el volumen y rango promedio para CADA hora del día y guarda el resultado."""
-    hourly_analysis = df.groupby('hour_utc').agg(
-        avg_volume=('volume', 'mean'),
-        avg_range=('candle_range', 'mean'),
-        count=('timestamp', 'size')
-    ).sort_values(by='avg_volume', ascending=False)
-    
-    # -----------------
-    # AÑADIR EXPORTACIÓN CSV
-    # -----------------
-    # Usa el parámetro 'symbol' que recibe la función
-    report_filename = f'{symbol.replace("/", "_")}_time_bias_hourly_analysis.csv' 
-    hourly_analysis.to_csv(report_filename)
-    print(f"\n✅ Reporte de Análisis por Hora guardado en: {report_filename}")
-
-    print("\n📊 Análisis Detallado por Hora (UTC):")
-    print(hourly_analysis.head(5)) 
-    print("-" * 40)
-    
-    peak_hour = hourly_analysis.iloc[0].name
-    print(f"Hora Pico de Volumen Real (UTC): {peak_hour}:00")
-    
-    return hourly_analysis
 
 # NUEVO INDICADOR: Devolver el Retorno Bruto (GR) de la Kill Zone
 def analyze_gross_return(df):
@@ -285,15 +266,29 @@ def calculate_exit_levels(entry_price, atr_value, direction):
     return round(stop_loss, 2), round(take_profit, 2)
 
 
-def monitor_and_close_positions(current_price_data):
+def monitor_and_close_positions(current_price_data, exchange):
     """
-    Simula la comprobación de posiciones abiertas contra SL/TP/Time Exit, y calcula PnL.
-    current_price_data: Diccionario con precios actuales (ej: {'BTC/USD': 87087.04, ...})
+    Monitorea posiciones abiertas contra SL/TP/Time Exit.
+    current_price_data: Diccionario con precios actuales (simulados o reales).
+    exchange: Instancia de CCXT para obtener la hora y potencialmente ejecutar órdenes reales.
     """
-    global OPEN_POSITIONS, CLOSED_TRADES # Asegurarse de que CLOSED_TRADES sea global
+    global OPEN_POSITIONS, CLOSED_TRADES 
 
-    print("\n--- INICIANDO MONITOREO DE POSICIONES ---")
+    # 1. Obtener la hora actual UTC
+    # Usamos la hora local de la máquina y la convertimos a UTC
+    now_utc = datetime.now(pytz.utc)
+    current_utc_hour = now_utc.hour
     
+    # Si estamos dentro de la Kill Zone, no deberíamos aplicar Time Exit todavía.
+    # El Time Exit solo aplica DESPUÉS de la hora de cierre de la Kill Zone.
+    time_exit_allowed = (current_utc_hour >= KILL_ZONE_END)
+    
+    if time_exit_allowed:
+        print(f"\n--- [ CIERRE POR TIEMPO ACTIVO ] --- Hora actual: {now_utc.strftime('%H:%M:%S')} UTC")
+    else:
+        print(f"\n--- [ MONITOREO SL/TP ] --- Hora actual: {now_utc.strftime('%H:%M:%S')} UTC")
+
+
     # Recorrer las posiciones de atrás hacia adelante para eliminar sin problemas
     for i in range(len(OPEN_POSITIONS) - 1, -1, -1):
         pos = OPEN_POSITIONS[i]
@@ -306,35 +301,32 @@ def monitor_and_close_positions(current_price_data):
             continue
             
         exit_reason = None
-        close_price = None # Usaremos esta variable para el cálculo de PnL
+        close_price = None 
 
-        # Lógica de CIERRE LONG
+        # 2. Lógica de CIERRE por SL/TP (Prioridad Máxima)
         if pos['direction'] == 'LONG (COMPRA)':
             if current_price >= pos['take_profit']:
                 exit_reason = "TAKE PROFIT (TP)"
-                close_price = pos['take_profit'] # ¡USAR NIVEL FIJO!
+                close_price = pos['take_profit'] # Usar nivel fijo
             elif current_price <= pos['stop_loss']:
                 exit_reason = "STOP LOSS (SL)"
-                close_price = pos['stop_loss'] # ¡USAR NIVEL FIJO!
+                close_price = pos['stop_loss'] # Usar nivel fijo
         
-        # Lógica de CIERRE SHORT
         elif pos['direction'] == 'SHORT (VENTA)':
             if current_price <= pos['take_profit']: 
                 exit_reason = "TAKE PROFIT (TP)"
-                close_price = pos['take_profit'] # ¡USAR NIVEL FIJO!
+                close_price = pos['take_profit'] # Usar nivel fijo
             elif current_price >= pos['stop_loss']: 
                 exit_reason = "STOP LOSS (SL)"
-                close_price = pos['stop_loss'] # ¡USAR NIVEL FIJO!
+                close_price = pos['stop_loss'] # Usar nivel fijo
 
-        # **************************************************
-        # NUEVO: LÓGICA DE CIERRE POR TIEMPO (TIME EXIT)
-        # **************************************************
-        # Si no cerró por precio, se cierra por tiempo al precio actual simulado
-        if exit_reason is None:
-            exit_reason = "TIME EXIT (END OF KZ)"
-            close_price = current_price # Usar el precio simulado como precio de cierre
+        # 3. Lógica de CIERRE por Tiempo (Time Exit)
+        # Solo se ejecuta si no se ha cerrado por SL/TP y el tiempo ha expirado
+        if exit_reason is None and time_exit_allowed:
+            exit_reason = "TIME EXIT (KZ EXPIRÓ)"
+            close_price = current_price # Cerrar al precio de mercado (simulado)
             
-        # Si hay una razón de salida (TP, SL o Time Exit), cerrar la posición
+        # 4. Ejecución del Cierre y Registro
         if exit_reason:
             
             # Calcular PnL (Ganancia/Pérdida)
@@ -355,6 +347,8 @@ def monitor_and_close_positions(current_price_data):
             pos['pnl_usd'] = pnl_usd 
             
             CLOSED_TRADES.append(OPEN_POSITIONS.pop(i))
+
+            save_open_positions()
             
     if not OPEN_POSITIONS:
         print("--- NO HAY POSICIONES ABIERTAS PENDIENTES ---")
@@ -446,164 +440,86 @@ def execute_trade_simulation(symbol, bias_score, atr_multiplier_value, historica
     }
     OPEN_POSITIONS.append(new_position)
 
+    save_open_positions()
 
 
-# Modificamos la función existente para que no imprima, sino que devuelva las métricas
-def calculate_metrics():
-    """Calcula las métricas de rendimiento de la corrida actual."""
+# Función para imprimir el reporte final de todas las corridas
+def print_final_trade_report():
+    """Imprime los trades cerrados para la corrida 0.05."""
     global CLOSED_TRADES
     if not CLOSED_TRADES:
-        return 0, 0, 0.0, 0 # Trades, Wins, Win Rate, PNL
+        print("No se cerraron trades durante la ejecución.")
+        return
         
     df_results = pd.DataFrame(CLOSED_TRADES)
     total_pnl = df_results['pnl_usd'].sum()
-    win_trades = len(df_results[df_results['pnl_usd'] > 0])
-    total_trades = len(df_results)
-    win_rate = (win_trades / total_trades) * 100 if total_trades > 0 else 0
     
-    return total_trades, win_trades, win_rate, total_pnl
-
-# Función para registrar la corrida
-def record_optimization_result(multiplier):
-    """Guarda los resultados de la corrida actual en el registro global."""
-    global OPTIMIZATION_RESULTS
-    total_trades, win_trades, win_rate, total_pnl = calculate_metrics()
-    
-    OPTIMIZATION_RESULTS.append({
-        'ATR_Multiplier': multiplier,
-        'Total_Trades': total_trades,
-        'Win_Trades': win_trades,
-        'Win_Rate': f"{win_rate:.2f}%",
-        'PNL_Total': round(total_pnl, 2)
-    })
-
-# Función para imprimir el reporte final de todas las corridas
-def print_optimization_report():
-    """Imprime una tabla comparativa de los resultados de optimización."""
-    global OPTIMIZATION_RESULTS
-    
-    if not OPTIMIZATION_RESULTS:
-        print("\n=== REPORTE DE OPTIMIZACIÓN FINAL ===")
-        print("No se registraron corridas de backtesting.")
-        return
-        
-    df_report = pd.DataFrame(OPTIMIZATION_RESULTS)
-    
-    # Encontrar el mejor resultado basado en PNL Total
-    best_result = df_report.loc[df_report['PNL_Total'].idxmax()]
-    
-    print("\n\n=======================================================")
-    print("=== REPORTE DE OPTIMIZACIÓN FINAL (ATR Multiplier) ===")
-    print("=======================================================")
-    print(df_report.to_markdown(index=False))
-    print("-------------------------------------------------------")
-    print(f"🥇 MEJOR CORRIDA (PNL): Multiplicador {best_result['ATR_Multiplier']:.2f} con PNL ${best_result['PNL_Total']:.2f}")
-    print("=======================================================")  
-
+    print("\n--- REPORTE FINAL DE TRADES CERRADOS ---")
+    print(df_results[['symbol', 'direction', 'entry_price', 'exit_price', 'exit_reason', 'pnl_usd']].to_markdown(index=False))
+    print(f"PNL TOTAL DE LA JORNADA: ${total_pnl:.2f}")
+    print("------------------------------------------")
 
 def main():
     # ---------------------------------------------
-    # 1. PARAMETRIZACIÓN GLOBAL
+    # 1. PARAMETRIZACIÓN GLOBAL (¡FIJADA!)
     # ---------------------------------------------
     TARGET_ASSETS = [
         'BTC/USD', 'ADA/USD', 'XRP/USD', 'SOL/USD', 
         'ETH/USD', 'LTC/USD', 'DOT/USD', 'BCH/USD', 'UNI/USD', 'LINK/USD'
     ]
+    OPTIMAL_ATR_MULTIPLIER = 0.05 
     TIME_FRAME = '1h'
-    START_DATE = '2025-06-14' 
-    
-    # NUEVO: Rango de valores a probar para el multiplicador de ATR (Filtro)
-    ATR_MULTIPLIERS_TO_TEST = [0.05, 0.10, 0.15, 0.20] 
-    
-    # ---------------------------------------------
+    HOURS_TO_ANALYZE = 50 
+
+    # Limpieza necesaria
+    global CLOSED_TRADES, OPEN_POSITIONS
+    CLOSED_TRADES = []
     
     kraken = initialize_kraken_exchange()
     if not kraken:
         print("Fallo la inicialización de Kraken. Deteniendo el proceso.")
         return
 
-    # --- INICIO DEL BUCLE DE OPTIMIZACIÓN ---
-    for multiplier in ATR_MULTIPLIERS_TO_TEST:
-        
-        # 1. Resetear el estado para esta corrida
-        global OPEN_POSITIONS, CLOSED_TRADES
-        OPEN_POSITIONS = []
-        CLOSED_TRADES = [] 
-        
-        print(f"\n=======================================================")
-        print(f"=== CORRIDA DE OPTIMIZACIÓN: ATR Multiplicador = {multiplier:.2f} ===")
-        print(f"=======================================================\n")
-        
-        # 2. Bucle interno para ITERAR sobre cada activo (Lógica de Apertura)
-        for symbol in TARGET_ASSETS:
-            TARGET_SYMBOL = symbol # Asignación de símbolo
-        
-            # *************************************************************
-            # * AHORA, TODA ESTA LÓGICA ESTÁ DENTRO DEL BUCLE INTERNO     *
-            # *************************************************************
-            
-            print(f"\n--- [ {TARGET_SYMBOL} ] Iniciando análisis...")
-            
-            # 3. Descargar los datos OHLCV para el activo actual
-            historical_data = fetch_historical_data(
-                kraken, 
-                symbol=TARGET_SYMBOL, 
-                timeframe=TIME_FRAME, 
-                start_date_str=START_DATE
-            ) 
-            
-            if historical_data is not None and not historical_data.empty: 
-                
-                # 4. Procesamiento y Análisis
-                processed_data = preprocess_data_for_time_bias(historical_data)
-                data_with_zones = mark_kill_zones(processed_data)
+    # NUEVO: Verificación de Autenticación (Moviendo la lógica del if __name__ == '__main__':)
+    try:
+         balance = kraken.fetch_balance()
+         print("✅ Autenticación exitosa. Saldo cargado.")
+    except Exception as e:
+         print(f"⚠️ ¡Error CRÍTICO de autenticación! El bot no puede operar. Deteniendo.")
+         return
 
-                # 5. CÁLCULO DEL SESGO
-                time_bias_score = analyze_gross_return(data_with_zones)
+    # =========================================================
+    # --- SIMULACIÓN DE EJECUCIÓN LIVE ---
+    # =========================================================
 
-                # Impresión de sesgo...
-                
-                # 6. PASO CLAVE: Ejecutar la simulación
-                execute_trade_simulation(
-                    TARGET_SYMBOL, 
-                    time_bias_score, 
-                    multiplier, # <--- Correcto: usa el multiplicador actual
-                    historical_data
-                )
+    load_open_positions()
 
-                # 7. Reporte de Consola y Generación de CSV
-                analyze_time_bias(data_with_zones) 
-                analyze_all_hours(processed_data, symbol=TARGET_SYMBOL)
-
-            else:
-                print(f"!!! ADVERTENCIA: No se pudo obtener datos históricos para {TARGET_SYMBOL}. Saltando.")
-                
-            print(f"--- [ {TARGET_SYMBOL} ] Análisis Finalizado.\n")
-            
-        # *************************************************************
-        # * FIN DEL BUCLE INTERNO (for symbol in TARGET_ASSETS)       *
-        # *************************************************************
-
-
-        # 3. Simulación de Monitoreo y Cierre (CORREGIDO: Fuera del bucle interno)
-        simulated_current_prices = {
-           'BTC/USD': 87087.04, 'ETH/USD': 2856.80, 
-           'SOL/USD': 122.27, 'BCH/USD': 552.59,
-           'LTC/USD': 74.90, 'ADA/USD': 0.50,
-           'XRP/USD': 0.55, 'DOT/USD': 6.00, 'UNI/USD': 10.00, 'LINK/USD': 15.00
-        }
-
-        print("--- INICIANDO MONITOREO DE POSICIONES ---")
-        monitor_and_close_positions(simulated_current_prices)
-            
-        # 4. Registrar los resultados de la corrida 
-        record_optimization_result(multiplier) 
-
-    # --- FIN DEL BUCLE DE OPTIMIZACIÓN ---
+    # [MODULO 1: APERTURA DE POSICIONES]
+    # Este módulo se ejecutaría solo una vez al día (ej: 14:00 UTC)
+    print(f"\n[MODULO 1] INICIANDO APERTURA (Multiplicador ATR: {OPTIMAL_ATR_MULTIPLIER:.2f})")
     
-    # 5. Reporte de Optimización Final (FUERA DE TODOS LOS BUCLES)
-    print_optimization_report()          
+    for symbol in TARGET_ASSETS:
+        execute_live_trade(
+            kraken, 
+            symbol=symbol, 
+            atr_multiplier=OPTIMAL_ATR_MULTIPLIER,
+            hours_to_analyze=HOURS_TO_ANALYZE
+        )
 
+    # [MODULO 2: MONITOREO Y CIERRE]
+    # En un entorno real, esto se ejecutaría en un bucle cada 5-10 minutos.
+    print("\n[MODULO 2] SIMULANDO MONITOREO Y CIERRE (Se asume la hora de cierre de KZ)")
+    
+    # Usamos los precios simulados para la prueba final (simulando precios de las 18:00 UTC)
+    simulated_current_prices = {
+       'BTC/USD': 87087.04, 'ETH/USD': 2856.80, 
+       'SOL/USD': 122.27, 'BCH/USD': 552.59,
+       'LTC/USD': 74.90, 'ADA/USD': 0.50,
+       'XRP/USD': 0.55, 'DOT/USD': 6.00, 'UNI/USD': 10.00, 'LINK/USD': 15.00
+    }
+    
+    # LLAMAMOS A LA FUNCIÓN CON EL EXCHANGE REAL, aunque los precios sean simulados
+    monitor_and_close_positions(simulated_current_prices, kraken) 
 
-if __name__ == '__main__':
-    main()
+    # [MODULO 3: REPORTE FINAL]
+    print_final_trade_report()        
