@@ -115,8 +115,10 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function exportCurrentTableCSV(){
-    const table = document.querySelector('#table table');
-    if(!table) return alert('No hay tabla para exportar');
+    // Preferir la tabla de análisis, si no existe usar la de posiciones
+    let table = document.querySelector('#table table');
+    if(!table) table = document.querySelector('#positionsTable table');
+    if(!table) return alert('No hay tabla para exportar. Pulsa "Load" para cargar un análisis o abre "Posiciones".');
     let csv = '';
     const rows = table.querySelectorAll('tr');
     rows.forEach(r => {
