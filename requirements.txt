@@ -4,3 +4,7 @@ python-dotenv
 pytz
 python-dateutil
 jsonschema
+streamlit
+plotly
+flask
+flask-cors

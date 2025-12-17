@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Dashboard Sesgos - Kraken</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://cdn.plot.ly/plotly-2.29.1.min.js"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <!-- inline SVG logo so colors can follow CSS variables -->
+        <svg class="logo" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg" aria-label="Synapse AI logo">
+          <defs>
+            <linearGradient id="g1" x1="0" x2="1" y1="0" y2="1">
+              <stop offset="0%" stop-color="#0b7fda"/>
+              <stop offset="100%" stop-color="#0f9b8e"/>
+            </linearGradient>
+          </defs>
+          <g transform="translate(100,72)">
+            <circle cx="0" cy="0" r="36" fill="url(#g1)" opacity="0.95" />
+            <g fill="white" opacity="0.95">
+              <circle cx="-18" cy="-10" r="5" />
+              <circle cx="18" cy="-10" r="5" />
+              <circle cx="0" cy="18" r="5" />
+              <path d="M-13 -6 C -5 -2, -2 8, 0 12" stroke="white" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M13 -6 C 5 -2, 2 8, 0 12" stroke="white" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M-18 -4 L 18 -4" stroke="white" stroke-width="1.2" fill="none" stroke-linecap="round"/>
+            </g>
+          </g>
+          <g transform="translate(100,140)">
+            <text x="0" y="0" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-weight="700" font-size="20" fill="var(--text)">Synapse</text>
+            <text x="0" y="20" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-weight="600" font-size="14" fill="var(--text)">AI</text>
+          </g>
+        </svg>
+        <h1>Sesgos de Tiempo — Kraken</h1>
+      </div>
+      <div class="header-actions">
+        <input id="globalSearch" type="search" placeholder="Buscar..." />
+        <button id="refreshBtn" class="small">Refresh</button>
+        <button id="exportBtn" class="small">Export CSV</button>
+      </div>
+    </header>
+
+    <main class="container">
+      <aside class="sidebar">
+        <label for="symbol">Símbolo</label>
+        <select id="symbol"></select>
+
+        <label for="hours">Horas a analizar</label>
+        <input id="hours" type="number" value="50" min="10" max="500" />
+
+        <button id="loadBtn">Cargar Análisis</button>
+        <button id="positionsBtn">Ver Posiciones</button>
+
+        <div style="margin-top:12px;display:flex;align-items:center;gap:8px">
+          <label for="themeToggle" style="font-size:13px;color:var(--text);margin:0">Tema claro</label>
+          <input type="checkbox" id="themeToggle" />
+        </div>
+      </aside>
+
+      <section class="content">
+        <div id="metrics" class="cards"></div>
+
+        <div id="charts" class="charts">
+          <div id="volChart" class="chart"></div>
+          <div id="rangeChart" class="chart"></div>
+        </div>
+
+        <div id="table" class="table"></div>
+
+        <section id="positionsSection" class="card" style="margin-top:12px">
+          <h3>Posiciones</h3>
+          <div id="positionsTable"></div>
+        </section>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -1,12 +1,62 @@
 [
     {
-        "symbol": "BTC/USD",
-        "direction": "LONG (COMPRA)",
-        "entry_price": 123.45,
-        "amount_base": 0.0001,
-        "stop_loss": 120.0,
-        "take_profit": 130.0,
+        "symbol": "SOL/USD",
+        "direction": "SHORT (VENTA)",
+        "entry_price": 128.44,
+        "amount_base": 0.7785736530675802,
+        "stop_loss": 130.71,
+        "take_profit": 123.9,
         "status": "OPEN",
-        "open_time": "2025-12-16 12:00:00+00:00"
+        "open_time": 49
+    },
+    {
+        "symbol": "ETH/USD",
+        "direction": "SHORT (VENTA)",
+        "entry_price": 2949.47,
+        "amount_base": 0.033904396383078995,
+        "stop_loss": 2998.33,
+        "take_profit": 2851.75,
+        "status": "OPEN",
+        "open_time": 49
+    },
+    {
+        "symbol": "LTC/USD",
+        "direction": "SHORT (VENTA)",
+        "entry_price": 78.89,
+        "amount_base": 1.2675877804537965,
+        "stop_loss": 79.98,
+        "take_profit": 76.7,
+        "status": "OPEN",
+        "open_time": 49
+    },
+    {
+        "symbol": "BCH/USD",
+        "direction": "SHORT (VENTA)",
+        "entry_price": 545.99,
+        "amount_base": 0.18315353761057895,
+        "stop_loss": 553.9,
+        "take_profit": 530.17,
+        "status": "OPEN",
+        "open_time": 49
+    },
+    {
+        "symbol": "UNI/USD",
+        "direction": "SHORT (VENTA)",
+        "entry_price": 5.193,
+        "amount_base": 19.256691700365877,
+        "stop_loss": 5.28,
+        "take_profit": 5.02,
+        "status": "OPEN",
+        "open_time": 49
+    },
+    {
+        "symbol": "LINK/USD",
+        "direction": "SHORT (VENTA)",
+        "entry_price": 12.85639,
+        "amount_base": 7.778233236546185,
+        "stop_loss": 13.08,
+        "take_profit": 12.4,
+        "status": "OPEN",
+        "open_time": 49
     }
 ]
