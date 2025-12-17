@@ -7,36 +7,126 @@ from datetime import datetime
 import time
 import ta.volatility
 import json
+import tempfile
+import shutil
+import threading
+import logging
+from logging.handlers import TimedRotatingFileHandler
+import gzip
+from dataclasses import dataclass, asdict, field
+from typing import List, Optional, Any, Dict
+
+try:
+  import dateutil.parser as dateutil_parser
+except Exception:
+  dateutil_parser = None
+
+try:
+    from jsonschema import validate as jsonschema_validate, ValidationError
+except Exception:
+    jsonschema_validate = None
+    ValidationError = Exception
 
 
 # REGISTRO GLOBAL DE POSICIONES ABIERTAS (Manejo de estado)
-OPEN_POSITIONS = []
-CLOSED_TRADES = [] # <-- AÑADIDO: Para guardar los resultados de PnL
+OPEN_POSITIONS: List[Dict[str, Any]] = []
+CLOSED_TRADES: List[Dict[str, Any]] = [] # <-- AÑADIDO: Para guardar los resultados de PnL
+
+
+@dataclass
+class Position:
+    symbol: str
+    direction: str
+    entry_price: float
+    amount_base: float
+    stop_loss: Optional[float]
+    take_profit: Optional[float]
+    status: str
+    open_time: Any = field(default_factory=lambda: datetime.now(pytz.utc))
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = asdict(self)
+        # Asegurar que open_time es serializable (ISO)
+        if isinstance(d.get('open_time'), datetime):
+            d['open_time'] = d['open_time'].isoformat()
+        return d
+
+    @staticmethod
+    def from_dict(d: Dict[str, Any]) -> 'Position':
+        ot = d.get('open_time')
+        if isinstance(ot, str):
+            if dateutil_parser:
+                ot_parsed = dateutil_parser.parse(ot)
+            else:
+                ot_parsed = datetime.fromisoformat(ot)
+            d['open_time'] = ot_parsed
+        return Position(**d)
 
 
 # 1. Cargar variables del archivo .env
 load_dotenv()
 
+# Configuración de logging con rotación diaria + compresión
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'kraken.log')
+def _rotator(source, dest):
+    try:
+        with open(source, 'rb') as sf, gzip.open(dest + '.gz', 'wb') as df:
+            shutil.copyfileobj(sf, df)
+        os.remove(source)
+    except Exception:
+        # Si la compresión falla, intentar mover el fichero sin comprimir
+        try:
+            shutil.move(source, dest)
+        except Exception:
+            pass
+
+def _namer(name):
+    return name + '.gz'
+
+file_handler = TimedRotatingFileHandler(LOG_FILE, when='midnight', interval=1, backupCount=30, utc=True, encoding='utf-8')
+file_handler.rotator = _rotator
+file_handler.namer = _namer
+
+stream_handler = logging.StreamHandler()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s %(message)s',
+    handlers=[file_handler, stream_handler]
+)
+
 # 2. Inicializar la conexión
 def initialize_kraken_exchange():
     """Inicializa la instancia de Kraken usando las credenciales del entorno."""
-    
-    # Intenta inicializar el exchange con las credenciales, si existen
     try:
         exchange = ccxt.kraken({
             'apiKey': os.getenv('KRAKEN_API_KEY'),
             'secret': os.getenv('KRAKEN_SECRET'),
-            'enableRateLimit': True, # Para evitar exceder los límites de la API
+            'enableRateLimit': True,
         })
-        print("✅ Conexión a Kraken inicializada correctamente.")
+        logging.info("Conexión a Kraken inicializada correctamente.")
         return exchange
     except Exception as e:
-        print(f"❌ Error al inicializar Kraken: {e}")
+        logging.error(f"Error al inicializar Kraken: {e}")
         return None
 
 
 # Nombre del archivo para guardar las posiciones abiertas
 POSITIONS_FILE = 'open_positions.json'
+# Debounce/periodic save settings
+_SAVE_LOCK = threading.Lock()
+_LAST_SAVE_TIME = 0.0
+_SAVE_DEBOUNCE_SECONDS = 1.0
+_SAVE_PENDING = False
+
+# JSON schema simple para validación
+POSITIONS_SCHEMA = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "required": ["symbol", "direction", "entry_price", "amount_base", "status", "open_time"]
+    }
+}
 
 def load_open_positions():
     """Carga las posiciones abiertas desde un archivo JSON al inicio."""
@@ -45,29 +135,91 @@ def load_open_positions():
         if os.path.exists(POSITIONS_FILE):
             with open(POSITIONS_FILE, 'r') as f:
                 data = json.load(f)
-                
-                # Convertir los timestamps cargados a objetos datetime si es necesario, 
-                # o dejarlos como strings/timestamps para simplificar. 
-                # Por ahora, los dejamos tal cual.
-                OPEN_POSITIONS = data
-                print(f"✅ {len(OPEN_POSITIONS)} Posiciones abiertas cargadas desde {POSITIONS_FILE}.")
+
+                # Validar esquema si jsonschema está disponible
+                if jsonschema_validate:
+                    try:
+                        jsonschema_validate(instance=data, schema=POSITIONS_SCHEMA)
+                    except ValidationError as ve:
+                        logging.warning(f"Esquema inválido en {POSITIONS_FILE}: {ve}")
+
+                # Convertir cada dict a Position para normalizar tipos
+                loaded = []
+                for item in data:
+                    try:
+                        pos = Position.from_dict(item)
+                        loaded.append(pos.to_dict())
+                    except Exception:
+                        # Si falla conversión, mantener el dict original
+                        loaded.append(item)
+
+                OPEN_POSITIONS = loaded
+                logging.info(f"{len(OPEN_POSITIONS)} posiciones abiertas cargadas desde {os.path.abspath(POSITIONS_FILE)}.")
                 return
     except Exception as e:
-        print(f"⚠️ Error al cargar posiciones: {e}. Iniciando con lista vacía.")
+        logging.warning(f"Error al cargar posiciones: {e}. Iniciando con lista vacía.")
     
     OPEN_POSITIONS = []
 
 def save_open_positions():
     """Guarda las posiciones abiertas en un archivo JSON."""
     global OPEN_POSITIONS
-    try:
-        with open(POSITIONS_FILE, 'w') as f:
-            # Serializamos la lista de posiciones. Si tuviéramos objetos datetime,
-            # deberíamos convertirlos a string antes de serializar.
-            json.dump(OPEN_POSITIONS, f, indent=4)
-        # print(f"✅ Estado de posiciones guardado en {POSITIONS_FILE}.")
-    except Exception as e:
-        print(f"❌ Error al guardar posiciones: {e}")            
+    # Escritura atómica con debounce
+    def _write_atomic(data_to_write):
+        dirpath = os.path.dirname(os.path.abspath(POSITIONS_FILE)) or '.'
+        fd, tmp_path = tempfile.mkstemp(prefix='._op_', dir=dirpath)
+        try:
+            with os.fdopen(fd, 'w') as tmpf:
+                json.dump(data_to_write, tmpf, indent=4, default=str)
+                tmpf.flush()
+                os.fsync(tmpf.fileno())
+            # Mover atómicamente
+            shutil.move(tmp_path, POSITIONS_FILE)
+            logging.info(f"Estado de posiciones guardado en {os.path.abspath(POSITIONS_FILE)}.")
+        finally:
+            # Asegurar que el tmpfile no quede si hubo error
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+
+    with _SAVE_LOCK:
+        now = time.time()
+        data_snapshot = []
+        # Convertir Position-like dicts to serializables
+        for p in OPEN_POSITIONS:
+            if isinstance(p, Position):
+                data_snapshot.append(p.to_dict())
+            else:
+                # intentar normalizar open_time
+                p_copy = dict(p)
+                ot = p_copy.get('open_time')
+                if isinstance(ot, datetime):
+                    p_copy['open_time'] = ot.isoformat()
+                data_snapshot.append(p_copy)
+
+        # Debounce: si último guardado fue hace menos de debounce, postergar
+        global _LAST_SAVE_TIME, _SAVE_PENDING
+        if now - _LAST_SAVE_TIME < _SAVE_DEBOUNCE_SECONDS:
+            # marcar pendiente y lanzar un timer si no existe
+            _SAVE_PENDING = True
+            def _delayed():
+                global _SAVE_PENDING, _LAST_SAVE_TIME
+                _write_atomic(data_snapshot)
+                _LAST_SAVE_TIME = time.time()
+                _SAVE_PENDING = False
+
+            t = threading.Timer(_SAVE_DEBOUNCE_SECONDS, _delayed)
+            t.daemon = True
+            t.start()
+            return
+
+        try:
+            _write_atomic(data_snapshot)
+            _LAST_SAVE_TIME = now
+        except Exception as e:
+            logging.error(f"Error al guardar posiciones: {e}")
 
         
 # NUEVA FUNCIÓN (o adaptación)
@@ -85,7 +237,7 @@ def fetch_recent_data(exchange, symbol='BTC/USD', timeframe='1h', limit=50):
         )
         
         if not ohlcv:
-            print(f"!!! No se obtuvieron datos recientes para {symbol}.")
+            logging.warning(f"No se obtuvieron datos recientes para {symbol}.")
             return None
             
         # 4. Compilación de Datos en un único DataFrame
@@ -96,7 +248,7 @@ def fetch_recent_data(exchange, symbol='BTC/USD', timeframe='1h', limit=50):
         return df
         
     except Exception as e:
-        print(f"❌ Error al obtener datos recientes para {symbol}: {e}")
+        logging.error(f"Error al obtener datos recientes para {symbol}: {e}")
         return None
     
 
@@ -106,13 +258,13 @@ def execute_live_trade(kraken, symbol, atr_multiplier=0.05, timeframe='1h', hour
     Obtiene los datos recientes (last N hours) para calcular el ATR y el Sesgo.
     """
     
-    print(f"\n--- [ LIVE TRADE: {symbol} ] Analizando...")
+    logging.info(f"--- [ LIVE TRADE: {symbol} ] Analizando...")
     
     # 1. Obtener Datos Recientes (Usando la nueva función de límite)
     historical_data = fetch_recent_data(kraken, symbol, timeframe, limit=hours_to_analyze)
 
     if historical_data is None or historical_data.empty:
-        print(f"!!! No hay datos recientes para {symbol}. Saltando.")
+        logging.warning(f"No hay datos recientes para {symbol}. Saltando.")
         return
 
     # 2. Análisis del Sesgo de Tiempo
@@ -135,7 +287,7 @@ def execute_live_trade(kraken, symbol, atr_multiplier=0.05, timeframe='1h', hour
     # de este punto para que la ejecución en vivo sea más limpia y rápida, 
     # ya que solo son útiles para el reporte y análisis en backtesting.
     
-    print(f"--- {symbol} | Sesgo: {time_bias_score:.2f} | Decisión Registrada. ---")    
+    logging.info(f"{symbol} | Sesgo: {time_bias_score:.2f} | Decisión Registrada.")    
       
 
 def preprocess_data_for_time_bias(df):
@@ -158,7 +310,7 @@ def preprocess_data_for_time_bias(df):
     # 3. Calcular Rango (Volatilidad)
     df['candle_range'] = df['high'] - df['low']
     
-    print(f"✅ Datos pre-procesados. Zona horaria: {df.index.tz}")
+    logging.info(f"Datos pre-procesados. Zona horaria: {df.index.tz}")
     return df.reset_index(drop=True)
 
 
@@ -174,7 +326,7 @@ def mark_kill_zones(df):
     # 1. Crear una columna booleana que es True si la hora está dentro del rango
     df['is_kill_zone'] = (df['hour_utc'] >= KILL_ZONE_START) & (df['hour_utc'] < KILL_ZONE_END)
     
-    print("✅ Kill Zones marcadas en el DataFrame.")
+    logging.info("Kill Zones marcadas en el DataFrame.")
     return df
 
 
@@ -195,19 +347,19 @@ def analyze_gross_return(df):
     low_liquidity_gr = df[df['is_kill_zone'] == False]['gross_return'].mean()
     
     # Mostrar resultados en consola
-    print("\n💰 Análisis de Retorno Bruto Promedio (por Vela):")
-    print("-" * 50)
+    logging.info("Análisis de Retorno Bruto Promedio (por Vela):")
+    logging.info("-" * 50)
     
     # Manejo de NaN para evitar errores
     if pd.isna(kill_zone_gr):
-        print(f"KILL ZONE (14:00 a 18:00 UTC): $nan (Movimiento promedio)")
+        logging.warning("KILL ZONE (14:00 a 18:00 UTC): NaN (Movimiento promedio)")
         sesgo = "Neutro (Error de Cálculo o Datos insuficientes)."
         return 0.0 # Devolver 0.0 en caso de error para que el if/elif del main no falle
         
     # Continuación si no es NaN
-    print(f"KILL ZONE (14:00 a 18:00 UTC): ${kill_zone_gr:.2f} (Movimiento promedio)")
-    print(f"LOW LIQUIDITY (Otras Horas): ${low_liquidity_gr:.2f} (Movimiento promedio)")
-    print("-" * 50)
+    logging.info(f"KILL ZONE (14:00 a 18:00 UTC): ${kill_zone_gr:.2f} (Movimiento promedio)")
+    logging.info(f"LOW LIQUIDITY (Otras Horas): ${low_liquidity_gr:.2f} (Movimiento promedio)")
+    logging.info("-" * 50)
     
     if kill_zone_gr > 0:
         sesgo = "Ligeramente Alcista (el precio tiende a subir)."
@@ -216,7 +368,7 @@ def analyze_gross_return(df):
     else:
         sesgo = "Neutro."
         
-    print(f"Sesgo de Dirección en la KILL ZONE: {sesgo}")
+    logging.info(f"Sesgo de Dirección en la KILL ZONE: {sesgo}")
     
     # DEVUELVE el indicador clave: Retorno Bruto de la Kill Zone
     return kill_zone_gr
@@ -284,20 +436,25 @@ def monitor_and_close_positions(current_price_data, exchange):
     time_exit_allowed = (current_utc_hour >= KILL_ZONE_END)
     
     if time_exit_allowed:
-        print(f"\n--- [ CIERRE POR TIEMPO ACTIVO ] --- Hora actual: {now_utc.strftime('%H:%M:%S')} UTC")
+        logging.info(f"--- [ CIERRE POR TIEMPO ACTIVO ] --- Hora actual: {now_utc.strftime('%H:%M:%S')} UTC")
     else:
-        print(f"\n--- [ MONITOREO SL/TP ] --- Hora actual: {now_utc.strftime('%H:%M:%S')} UTC")
+        logging.info(f"--- [ MONITOREO SL/TP ] --- Hora actual: {now_utc.strftime('%H:%M:%S')} UTC")
 
 
     # Recorrer las posiciones de atrás hacia adelante para eliminar sin problemas
     for i in range(len(OPEN_POSITIONS) - 1, -1, -1):
         pos = OPEN_POSITIONS[i]
+        # Aceptar tanto `Position` como `dict` en la lista de posiciones.
+        # Si es `Position`, convertir y reemplazar el elemento en la lista
+        # para mantener consistencia con el resto del código que usa dicts.
+        if isinstance(pos, Position):
+            pos = OPEN_POSITIONS[i] = pos.to_dict()
         symbol = pos['symbol']
         
         current_price = current_price_data.get(symbol)
         
         if current_price is None:
-            print(f"!!! ADVERTENCIA: Precio actual no encontrado para {symbol}. Saltando monitoreo.")
+            logging.warning(f"ADVERTENCIA: Precio actual no encontrado para {symbol}. Saltando monitoreo.")
             continue
             
         exit_reason = None
@@ -338,7 +495,7 @@ def monitor_and_close_positions(current_price_data, exchange):
 
             pnl_status = "GANANCIA" if pnl_usd > 0 else "PÉRDIDA"
             
-            print(f"✅ CIERRE {symbol} | Motivo: {exit_reason} | PnL: ${pnl_usd:.2f} ({pnl_status})")
+            logging.info(f"CIERRE {symbol} | Motivo: {exit_reason} | PnL: ${pnl_usd:.2f} ({pnl_status})")
             
             # Mover la posición a la lista de cerradas y eliminar de la lista abierta
             pos['status'] = 'CLOSED'
@@ -351,9 +508,9 @@ def monitor_and_close_positions(current_price_data, exchange):
             save_open_positions()
             
     if not OPEN_POSITIONS:
-        print("--- NO HAY POSICIONES ABIERTAS PENDIENTES ---")
+        logging.info("NO HAY POSICIONES ABIERTAS PENDIENTES")
     else:
-        print(f"--- {len(OPEN_POSITIONS)} POSICIONES ABIERTAS PENDIENTES ---")
+        logging.info(f"{len(OPEN_POSITIONS)} POSICIONES ABIERTAS PENDIENTES")
 
 
 # ----------------------------------------------------
@@ -378,7 +535,7 @@ def execute_trade_simulation(symbol, bias_score, atr_multiplier_value, historica
         dynamic_threshold = atr_value * atr_multiplier_value 
 
     except Exception as e:
-        print(f"!!! ERROR al calcular ATR/Precios para {symbol}: {e}")
+        logging.error(f"ERROR al calcular ATR/Precios para {symbol}: {e}")
         return
     
     # ----------------------------------------------------
@@ -389,11 +546,11 @@ def execute_trade_simulation(symbol, bias_score, atr_multiplier_value, historica
     MAX_ATR_USD = 100.0 
 
     if atr_value < MIN_ATR_USD:
-        print(f"🛑 DECISIÓN: MANTENERSE AL MARGEN (VOLATILIDAD MUERTA). ATR (${atr_value:.2f}) < Umbral Mínimo (${MIN_ATR_USD:.2f}).")
+        logging.info(f"DECISIÓN: MANTENERSE AL MARGEN (VOLATILIDAD MUERTA). ATR (${atr_value:.2f}) < Umbral Mínimo (${MIN_ATR_USD:.2f}).")
         return
 
     if atr_value > MAX_ATR_USD:
-        print(f"🛑 DECISIÓN: MANTENERSE AL MARGEN (VOLATILIDAD EXTREMA). ATR (${atr_value:.2f}) > Umbral Máximo (${MAX_ATR_USD:.2f}).")
+        logging.info(f"DECISIÓN: MANTENERSE AL MARGEN (VOLATILIDAD EXTREMA). ATR (${atr_value:.2f}) > Umbral Máximo (${MAX_ATR_USD:.2f}).")
         return
     # ----------------------------------------------------
 
@@ -404,7 +561,7 @@ def execute_trade_simulation(symbol, bias_score, atr_multiplier_value, historica
         direction = "SHORT (VENTA)"
     else:
         direction = "NEUTRAL"
-        print(f"🛑 DECISIÓN: MANTENERSE AL MARGEN (SESGO NEUTRO). Umbral requerido: ${dynamic_threshold:.2f}")
+        logging.info(f"DECISIÓN: MANTENERSE AL MARGEN (SESGO NEUTRO). Umbral requerido: ${dynamic_threshold:.2f}")
         return
         
     # 3. Calcular los niveles de salida 
@@ -414,31 +571,41 @@ def execute_trade_simulation(symbol, bias_score, atr_multiplier_value, historica
     amount_usd = 100.0  # Invertir 100 USD
     amount_base = amount_usd / entry_price
     
-    print(f"💰 DECISIÓN: INICIAR {direction}")
-    print("-" * 50)
-    print(f"--- ORDEN SIMULADA ---")
-    print(f" Activo: {symbol}")
-    print(f" Dirección: {direction}")
-    print(f" Score (GR): ${bias_score:.2f}")
-    print(f" Precio Entrada: ${entry_price:.2f}")
-    print(f" Cantidad Base: {amount_base:.5f} {symbol.split('/')[0]}")
-    print(f" Volatilidad (ATR): ${atr_value:.2f}")
-    print(f" ** STOP LOSS (SL): ${stop_loss:.2f} **")
-    print(f" ** TAKE PROFIT (TP): ${take_profit:.2f} **")
-    print("-" * 50)
+    logging.info(f"DECISIÓN: INICIAR {direction}")
+    logging.info("-" * 50)
+    logging.info("--- ORDEN SIMULADA ---")
+    logging.info(f"Activo: {symbol}")
+    logging.info(f"Dirección: {direction}")
+    logging.info(f"Score (GR): ${bias_score:.2f}")
+    logging.info(f"Precio Entrada: ${entry_price:.2f}")
+    logging.info(f"Cantidad Base: {amount_base:.5f} {symbol.split('/')[0]}")
+    logging.info(f"Volatilidad (ATR): ${atr_value:.2f}")
+    logging.info(f"STOP LOSS (SL): ${stop_loss:.2f}")
+    logging.info(f"TAKE PROFIT (TP): ${take_profit:.2f}")
+    logging.info("-" * 50)
 
     # 5. Guardar la posición
-    new_position = {
-        'symbol': symbol,
-        'direction': direction,
-        'entry_price': entry_price,
-        'amount_base': amount_base,
-        'stop_loss': stop_loss,
-        'take_profit': take_profit,
-        'status': 'OPEN',
-        'open_time': open_time 
-    }
-    OPEN_POSITIONS.append(new_position)
+    # Crear instancia Position para mayor consistencia
+    ot = open_time
+    # Convertir pandas.Timestamp a datetime si es necesario
+    try:
+        import pandas as _pd
+        if isinstance(ot, _pd.Timestamp):
+            ot = ot.to_pydatetime()
+    except Exception:
+        pass
+
+    pos_obj = Position(
+        symbol=symbol,
+        direction=direction,
+        entry_price=entry_price,
+        amount_base=amount_base,
+        stop_loss=stop_loss,
+        take_profit=take_profit,
+        status='OPEN',
+        open_time=ot
+    )
+    OPEN_POSITIONS.append(pos_obj)
 
     save_open_positions()
 
@@ -448,16 +615,16 @@ def print_final_trade_report():
     """Imprime los trades cerrados para la corrida 0.05."""
     global CLOSED_TRADES
     if not CLOSED_TRADES:
-        print("No se cerraron trades durante la ejecución.")
+        logging.info("No se cerraron trades durante la ejecución.")
         return
         
     df_results = pd.DataFrame(CLOSED_TRADES)
     total_pnl = df_results['pnl_usd'].sum()
     
-    print("\n--- REPORTE FINAL DE TRADES CERRADOS ---")
-    print(df_results[['symbol', 'direction', 'entry_price', 'exit_price', 'exit_reason', 'pnl_usd']].to_markdown(index=False))
-    print(f"PNL TOTAL DE LA JORNADA: ${total_pnl:.2f}")
-    print("------------------------------------------")
+    logging.info("--- REPORTE FINAL DE TRADES CERRADOS ---")
+    logging.info(df_results[['symbol', 'direction', 'entry_price', 'exit_price', 'exit_reason', 'pnl_usd']].to_string(index=False))
+    logging.info(f"PNL TOTAL DE LA JORNADA: ${total_pnl:.2f}")
+    logging.info("------------------------------------------")
 
 def main():
     # ---------------------------------------------
@@ -477,16 +644,16 @@ def main():
     
     kraken = initialize_kraken_exchange()
     if not kraken:
-        print("Fallo la inicialización de Kraken. Deteniendo el proceso.")
+        logging.error("Fallo la inicialización de Kraken. Deteniendo el proceso.")
         return
 
     # NUEVO: Verificación de Autenticación (Moviendo la lógica del if __name__ == '__main__':)
-    try:
-         balance = kraken.fetch_balance()
-         print("✅ Autenticación exitosa. Saldo cargado.")
-    except Exception as e:
-         print(f"⚠️ ¡Error CRÍTICO de autenticación! El bot no puede operar. Deteniendo.")
-         return
+        try:
+            balance = kraken.fetch_balance()
+            logging.info("Autenticación exitosa. Saldo cargado.")
+        except Exception as e:
+            logging.error(f"Error CRÍTICO de autenticación: {e}. El bot no puede operar. Deteniendo.")
+            return
 
     # =========================================================
     # --- SIMULACIÓN DE EJECUCIÓN LIVE ---
@@ -496,7 +663,7 @@ def main():
 
     # [MODULO 1: APERTURA DE POSICIONES]
     # Este módulo se ejecutaría solo una vez al día (ej: 14:00 UTC)
-    print(f"\n[MODULO 1] INICIANDO APERTURA (Multiplicador ATR: {OPTIMAL_ATR_MULTIPLIER:.2f})")
+    logging.info(f"[MODULO 1] INICIANDO APERTURA (Multiplicador ATR: {OPTIMAL_ATR_MULTIPLIER:.2f})")
     
     for symbol in TARGET_ASSETS:
         execute_live_trade(
@@ -508,7 +675,7 @@ def main():
 
     # [MODULO 2: MONITOREO Y CIERRE]
     # En un entorno real, esto se ejecutaría en un bucle cada 5-10 minutos.
-    print("\n[MODULO 2] SIMULANDO MONITOREO Y CIERRE (Se asume la hora de cierre de KZ)")
+    logging.info("[MODULO 2] SIMULANDO MONITOREO Y CIERRE (Se asume la hora de cierre de KZ)")
     
     # Usamos los precios simulados para la prueba final (simulando precios de las 18:00 UTC)
     simulated_current_prices = {
@@ -522,4 +689,8 @@ def main():
     monitor_and_close_positions(simulated_current_prices, kraken) 
 
     # [MODULO 3: REPORTE FINAL]
-    print_final_trade_report()        
+    print_final_trade_report() 
+
+
+if __name__ == "__main__":
+	main()

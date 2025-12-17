@@ -2,3 +2,5 @@ pandas
 ccxt
 python-dotenv
 pytz
+python-dateutil
+jsonschema
