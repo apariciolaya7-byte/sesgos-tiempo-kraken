@@ -29,7 +29,7 @@
   --sidebar-bg: rgba(2,18,43,0.06);
   --panel-bg: rgba(2,18,43,0.02);
 }
-. *{box-sizing:border-box}
+*{box-sizing:border-box}
 .body-theme{margin:0;font-family:Inter,Helvetica,Arial,sans-serif;background:var(--bg-gradient);color:var(--text)}
 body{margin:0;font-family:Inter,Helvetica,Arial,sans-serif;background:var(--bg-gradient);color:var(--text)}
 .topbar{background:linear-gradient(90deg,var(--accent1),var(--accent2));padding:12px 20px;border-bottom-left-radius:var(--radius);border-bottom-right-radius:var(--radius);display:flex;align-items:center;gap:12px}
