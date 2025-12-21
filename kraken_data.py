@@ -610,21 +610,37 @@ def execute_trade_simulation(symbol, bias_score, atr_multiplier_value, historica
     save_open_positions()
 
 
-# Función para imprimir el reporte final de todas las corridas
 def print_final_trade_report():
-    """Imprime los trades cerrados para la corrida 0.05."""
+    """Imprime un reporte analítico de nivel profesional para el grupo."""
     global CLOSED_TRADES
     if not CLOSED_TRADES:
-        logging.info("No se cerraron trades durante la ejecución.")
+        logging.info("--- REPORTE: Sin operaciones cerradas en este ciclo ---")
         return
         
     df_results = pd.DataFrame(CLOSED_TRADES)
-    total_pnl = df_results['pnl_usd'].sum()
     
-    logging.info("--- REPORTE FINAL DE TRADES CERRADOS ---")
-    logging.info(df_results[['symbol', 'direction', 'entry_price', 'exit_price', 'exit_reason', 'pnl_usd']].to_string(index=False))
-    logging.info(f"PNL TOTAL DE LA JORNADA: ${total_pnl:.2f}")
-    logging.info("------------------------------------------")
+    # Cálculos Métricos
+    total_pnl = df_results['pnl_usd'].sum()
+    wins = df_results[df_results['pnl_usd'] > 0]['pnl_usd']
+    losses = df_results[df_results['pnl_usd'] <= 0]['pnl_usd']
+    
+    gross_profit = wins.sum()
+    gross_loss = abs(losses.sum())
+    profit_factor = gross_profit / gross_loss if gross_loss != 0 else float('inf')
+    win_rate = (len(wins) / len(df_results)) * 100
+
+    # Formateo del Reporte para el Grupo
+    logging.info("=" * 60)
+    logging.info("📊 AUDITORÍA DE DISCIPLINA AUTOMATIZADA")
+    logging.info("=" * 60)
+    logging.info(df_results[['symbol', 'direction', 'exit_reason', 'pnl_usd']].to_string(index=False))
+    logging.info("-" * 60)
+    logging.info(f"✅ Trades Ganados: {len(wins)} | ❌ Trades Perdidos: {len(losses)}")
+    logging.info(f"🎯 Win Rate: {win_rate:.2f}%")
+    logging.info(f"📈 Profit Factor: {profit_factor:.2f}")
+    logging.info(f"💰 PNL TOTAL DE LA JORNADA: ${total_pnl:.2f}")
+    logging.info("=" * 60)
+    logging.info("Nota: Ejecución 100% algorítmica sin intervención humana.")
 
 def main():
     # ---------------------------------------------
@@ -673,23 +689,23 @@ def main():
             hours_to_analyze=HOURS_TO_ANALYZE
         )
 
-    # [MODULO 2: MONITOREO Y CIERRE]
-    # En un entorno real, esto se ejecutaría en un bucle cada 5-10 minutos.
-    logging.info("[MODULO 2] SIMULANDO MONITOREO Y CIERRE (Se asume la hora de cierre de KZ)")
+    # [MODULO 2: MONITOREO Y CIERRE REAL]
+    logging.info("[MODULO 2] OBTENIENDO PRECIOS DE CIERRE REALES DE KRAKEN...")
     
-    # Usamos los precios simulados para la prueba final (simulando precios de las 18:00 UTC)
-    simulated_current_prices = {
-       'BTC/USD': 87087.04, 'ETH/USD': 2856.80, 
-       'SOL/USD': 122.27, 'BCH/USD': 552.59,
-       'LTC/USD': 74.90, 'ADA/USD': 0.50,
-       'XRP/USD': 0.55, 'DOT/USD': 6.00, 'UNI/USD': 10.00, 'LINK/USD': 15.00
-    }
-    
-    # LLAMAMOS A LA FUNCIÓN CON EL EXCHANGE REAL, aunque los precios sean simulados
-    monitor_and_close_positions(simulated_current_prices, kraken) 
+    real_current_prices = {}
+    for symbol in TARGET_ASSETS:
+        try:
+            ticker = kraken.fetch_ticker(symbol)
+            real_current_prices[symbol] = ticker['last'] # Captura el último precio real
+            logging.info(f"Precio capturado: {symbol} -> ${real_current_prices[symbol]}")
+        except Exception as e:
+            logging.error(f"Error al capturar precio real de {symbol}: {e}")
+
+    # Ahora monitoreamos y cerramos con datos REALES del mercado
+    monitor_and_close_positions(real_current_prices, kraken) 
 
     # [MODULO 3: REPORTE FINAL]
-    print_final_trade_report() 
+    print_final_trade_report()
 
 
 if __name__ == "__main__":
