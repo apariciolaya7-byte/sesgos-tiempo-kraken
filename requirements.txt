@@ -8,3 +8,4 @@ streamlit
 plotly
 flask
 flask-cors
+ta

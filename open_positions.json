@@ -58,5 +58,55 @@
         "take_profit": 12.4,
         "status": "OPEN",
         "open_time": 49
+    },
+    {
+        "symbol": "SOL/USD",
+        "direction": "LONG (COMPRA)",
+        "entry_price": 125.17,
+        "amount_base": 0.7989134776703682,
+        "stop_loss": 124.06,
+        "take_profit": 127.39,
+        "status": "OPEN",
+        "open_time": 49
+    },
+    {
+        "symbol": "ETH/USD",
+        "direction": "LONG (COMPRA)",
+        "entry_price": 2986.84,
+        "amount_base": 0.03348019980983246,
+        "stop_loss": 2966.61,
+        "take_profit": 3027.3,
+        "status": "OPEN",
+        "open_time": 49
+    },
+    {
+        "symbol": "LTC/USD",
+        "direction": "LONG (COMPRA)",
+        "entry_price": 76.32,
+        "amount_base": 1.310272536687631,
+        "stop_loss": 75.62,
+        "take_profit": 77.72,
+        "status": "OPEN",
+        "open_time": 49
+    },
+    {
+        "symbol": "BCH/USD",
+        "direction": "LONG (COMPRA)",
+        "entry_price": 588.37,
+        "amount_base": 0.16996107891292894,
+        "stop_loss": 581.58,
+        "take_profit": 601.96,
+        "status": "OPEN",
+        "open_time": 49
+    },
+    {
+        "symbol": "UNI/USD",
+        "direction": "LONG (COMPRA)",
+        "entry_price": 6.146,
+        "amount_base": 16.270745200130165,
+        "stop_loss": 6.0,
+        "take_profit": 6.43,
+        "status": "OPEN",
+        "open_time": 49
     }
 ]
