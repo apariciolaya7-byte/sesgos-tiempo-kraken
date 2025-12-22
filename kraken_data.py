@@ -138,9 +138,27 @@ def handle_start(message):
     global trading_active
     if str(message.chat.id) == CHAT_ID:
         trading_active = True
-        bot.reply_to(message, "🚀 *SISTEMA ACTIVADO*\nBuscando entradas...")
-        # Iniciar ciclo de apertura en un hilo separado
-        threading.Thread(target=run_initial_cycle).start()
+        
+        # --- NUEVA LÓGICA DE FEEDBACK INSTANTÁNEO ---
+        now_utc = datetime.now(pytz.utc)
+        current_hour = now_utc.hour
+        
+        status_msg = "🚀 *SISTEMA ACTIVADO*\n\n"
+        status_msg += f"⏰ Hora actual: {now_utc.strftime('%H:%M')} UTC\n"
+        status_msg += f"📅 Ventana: {KILL_ZONE_START}:00 - {KILL_ZONE_END}:00 UTC\n\n"
+        
+        if KILL_ZONE_START <= current_hour < KILL_ZONE_END:
+            status_msg += "✅ *ESTADO:* En ventana operativa. ¡Buscando entradas ahora mismo!"
+        else:
+            # Calculamos cuánto falta para las 14:00 (opcional, pero muy pro)
+            wait_hours = (KILL_ZONE_START - current_hour) % 24
+            status_msg += f"⏳ *ESTADO:* Fuera de horario. El bot entrará en modo análisis en {wait_hours} horas."
+
+        bot.reply_to(message, status_msg, parse_mode='Markdown')
+        
+        # Iniciar hilo si no está corriendo
+        if not any(t.name == "TradingThread" for t in threading.enumerate()):
+            threading.Thread(target=run_initial_cycle, name="TradingThread").start()
     else:
         bot.reply_to(message, "❌ No autorizado.")
 
