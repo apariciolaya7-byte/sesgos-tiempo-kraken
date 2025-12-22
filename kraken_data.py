@@ -612,36 +612,43 @@ def execute_trade_simulation(symbol, bias_score, atr_multiplier_value, historica
 
 
 def print_final_trade_report():
-    """Imprime un reporte analítico de nivel profesional para el grupo."""
+    """Envía un reporte analítico de nivel profesional a Telegram."""
     global CLOSED_TRADES
     if not CLOSED_TRADES:
-        logging.info("--- REPORTE: Sin operaciones cerradas en este ciclo ---")
+        bot.send_message(CHAT_ID, "📊 *REPORTE DE JORNADA*\nNo se cerraron operaciones en este ciclo.")
         return
         
     df_results = pd.DataFrame(CLOSED_TRADES)
     
     # Cálculos Métricos
     total_pnl = df_results['pnl_usd'].sum()
-    wins = df_results[df_results['pnl_usd'] > 0]['pnl_usd']
-    losses = df_results[df_results['pnl_usd'] <= 0]['pnl_usd']
+    wins = df_results[df_results['pnl_usd'] > 0]
+    losses = df_results[df_results['pnl_usd'] <= 0]
     
-    gross_profit = wins.sum()
-    gross_loss = abs(losses.sum())
+    gross_profit = wins['pnl_usd'].sum()
+    gross_loss = abs(losses['pnl_usd'].sum())
     profit_factor = gross_profit / gross_loss if gross_loss != 0 else float('inf')
     win_rate = (len(wins) / len(df_results)) * 100
 
-    # Formateo del Reporte para el Grupo
-    logging.info("=" * 60)
-    logging.info("📊 AUDITORÍA DE DISCIPLINA AUTOMATIZADA")
-    logging.info("=" * 60)
-    logging.info(df_results[['symbol', 'direction', 'exit_reason', 'pnl_usd']].to_string(index=False))
-    logging.info("-" * 60)
-    logging.info(f"✅ Trades Ganados: {len(wins)} | ❌ Trades Perdidos: {len(losses)}")
-    logging.info(f"🎯 Win Rate: {win_rate:.2f}%")
-    logging.info(f"📈 Profit Factor: {profit_factor:.2f}")
-    logging.info(f"💰 PNL TOTAL DE LA JORNADA: ${total_pnl:.2f}")
-    logging.info("=" * 60)
-    logging.info("Nota: Ejecución 100% algorítmica sin intervención humana.")
+    # Construcción del mensaje para la comunidad
+    report_msg = "📊 *AUDITORÍA DE DISCIPLINA AUTOMATIZADA*\n"
+    report_msg += "--------------------------------------------------\n"
+    
+    # Detalle de cada trade
+    for _, row in df_results.iterrows():
+        icon = "✅" if row['pnl_usd'] > 0 else "❌"
+        report_msg += f"{icon} *{row['symbol']}* | {row['exit_reason']}\n"
+        report_msg += f"      PnL: `${row['pnl_usd']:.2f}`\n"
+    
+    report_msg += "--------------------------------------------------\n"
+    report_msg += f"✅ *Ganados:* {len(wins)}  |  ❌ *Perdidos:* {len(losses)}\n"
+    report_msg += f"🎯 *Win Rate:* `{win_rate:.2f}%` \n"
+    report_msg += f"📈 *Profit Factor:* `{profit_factor:.2f}`\n"
+    report_msg += f"💰 *PNL TOTAL:* `${total_pnl:.2f}`\n"
+    report_msg += "--------------------------------------------------\n"
+    report_msg += "🤖 _Ejecución 100% algorítmica sin intervención humana._"
+
+    bot.send_message(CHAT_ID, report_msg, parse_mode='Markdown')
 
 def main():
     # ---------------------------------------------
