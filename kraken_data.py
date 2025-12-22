@@ -48,6 +48,45 @@ OPEN_POSITIONS: List[Dict[str, Any]] = []
 CLOSED_TRADES: List[Dict[str, Any]] = []
 POSITIONS_FILE = 'open_positions.json'
 
+
+# --- 1.5 CEREBRO DE INTELIGENCIA Y AUDITORÍA ---
+
+class TradingAuditor:
+    def __init__(self, max_simultaneous=3, daily_loss_limit=25.0):
+        self.max_simultaneous = max_simultaneous
+        self.daily_loss_limit = daily_loss_limit
+
+    def check_safety(self, symbol, current_positions, current_balance):
+        # Evitamos la "metralleta" de 273 órdenes
+        if len(current_positions) >= self.max_simultaneous:
+            return False, f"Límite de {self.max_simultaneous} posiciones alcanzado."
+        
+        if any(p['symbol'] == symbol for p in current_positions):
+            return False, f"Ya operando {symbol}."
+            
+        # Stop Loss Global: Protegemos los $500
+        if (500.0 - current_balance) >= self.daily_loss_limit:
+            return False, "DRAWDOWN CRÍTICO: Operativa bloqueada por hoy."
+
+        return True, "OK"
+
+def estratega_no_supervisado(df):
+    """ Busca patrones de 'ruido' vs 'tendencia' """
+    kz_data = df[df['is_kill_zone'] == True]
+    if len(kz_data) < 2: return "NEUTRAL"
+
+    # Calculamos la 'limpieza' del movimiento
+    cuerpo_promedio = (kz_data['close'] - kz_data['open']).abs().mean()
+    rango_promedio = kz_data['candle_range'].mean()
+    coherencia = cuerpo_promedio / rango_promedio if rango_promedio > 0 else 0
+
+    if coherencia > 0.6: return "TENDENCIA_SOLIDA"
+    if coherencia < 0.3: return "RUIDO_LATERAL"
+    return "NEUTRAL"
+
+# Instanciamos al Auditor
+auditor = TradingAuditor(max_simultaneous=3, daily_loss_limit=25.0)
+
 # --- 2. MODELO DE DATOS (Tu estructura original) ---
 @dataclass
 class Position:
@@ -180,6 +219,18 @@ def handle_start(message):
     else:
         bot.reply_to(message, "❌ No autorizado.")
 
+
+def run_initial_cycle():
+    if not trading_active: return
+    for symbol in TARGET_ASSETS:
+        # Si alguien pulsa /stop en Telegram mientras el bucle recorre monedas
+        if not trading_active: 
+            logging.info("🛑 Parada de emergencia detectada en medio del ciclo.")
+            break 
+        try:
+            execute_live_trade(kraken, symbol, OPTIMAL_ATR_MULTIPLIER, '1h', HOURS_TO_ANALYZE)
+        except Exception as e:
+            logging.error(f"Error en {symbol}: {e}")
 
 
 @bot.message_handler(commands=['stop_trading'])
@@ -315,44 +366,37 @@ def fetch_recent_data(exchange, symbol='BTC/USD', timeframe='1h', limit=50):
         return None
     
 
-
-
 def execute_live_trade(kraken, symbol, atr_multiplier=0.05, timeframe='1h', hours_to_analyze=50):
-    """
-    Ejecuta la estrategia de Sesgo de Tiempo en un activo específico. 
-    Obtiene los datos recientes (last N hours) para calcular el ATR y el Sesgo.
-    """
+    global OPEN_POSITIONS, trading_active
     
-    logging.info(f"--- [ LIVE TRADE: {symbol} ] Analizando...")
-    
-    # 1. Obtener Datos Recientes (Usando la nueva función de límite)
+    # Detenemos si el usuario pulsó /stop_trading
+    if not trading_active: return 
+
     historical_data = fetch_recent_data(kraken, symbol, timeframe, limit=hours_to_analyze)
+    if historical_data is None or historical_data.empty: return
 
-    if historical_data is None or historical_data.empty:
-        logging.warning(f"No hay datos recientes para {symbol}. Saltando.")
-        return
-
-    # 2. Análisis del Sesgo de Tiempo
     processed_data = preprocess_data_for_time_bias(historical_data)
     data_with_zones = mark_kill_zones(processed_data)
     
-    # Calcula el puntaje de sesgo (Gross Return Score)
-    time_bias_score = analyze_gross_return(data_with_zones)
+    # --- PASO 1: EL ESTRATEGA (¿El patrón es visible?) ---
+    estado_mercado = estratega_no_supervisado(data_with_zones)
+    bias_score = analyze_gross_return(data_with_zones)
+    
+    # --- PASO 2: EL AUDITOR (¿Es seguro?) ---
+    balance_actual = get_virtual_balance()
+    is_safe, reason = auditor.check_safety(symbol, OPEN_POSITIONS, balance_actual)
 
-    # 3. Decisión y Ejecución
-    # Llama a la función de simulación que contiene toda la lógica optimizada
-    execute_trade_simulation(
-        symbol, 
-        time_bias_score, 
-        atr_multiplier, 
-        historical_data
-    )
-    
-    # NOTA: Opcionalmente, puedes eliminar las llamadas a analyze_time_bias y analyze_all_hours
-    # de este punto para que la ejecución en vivo sea más limpia y rápida, 
-    # ya que solo son útiles para el reporte y análisis en backtesting.
-    
-    logging.info(f"{symbol} | Sesgo: {time_bias_score:.2f} | Decisión Registrada.")    
+    # --- DECISIÓN FINAL ---
+    if not is_safe:
+        logging.info(f"🛡️ AUDITOR: {reason}")
+        return
+
+    if estado_mercado == "RUIDO_LATERAL":
+        logging.info(f"📉 ESTRATEGA: Mercado errático en {symbol}. Evitando trampa.")
+        return
+
+    # Si todo es OK, ejecutamos
+    execute_trade_simulation(symbol, bias_score, atr_multiplier, historical_data)   
       
 
 def preprocess_data_for_time_bias(df):
@@ -755,12 +799,12 @@ def main():
         return
 
     # NUEVO: Verificación de Autenticación (Moviendo la lógica del if __name__ == '__main__':)
-        try:
-            balance = kraken.fetch_balance()
-            logging.info("Autenticación exitosa. Saldo cargado.")
-        except Exception as e:
-            logging.error(f"Error CRÍTICO de autenticación: {e}. El bot no puede operar. Deteniendo.")
-            return
+    try:
+        balance = kraken.fetch_balance()
+        logging.info("Autenticación exitosa. Saldo cargado.")
+    except Exception as e:
+        logging.error(f"Error CRÍTICO de autenticación: {e}. El bot no puede operar. Deteniendo.")
+        return
 
     # =========================================================
     # --- SIMULACIÓN DE EJECUCIÓN LIVE ---
