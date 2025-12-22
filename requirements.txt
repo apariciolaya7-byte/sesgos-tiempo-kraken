@@ -1,4 +1,4 @@
-pandas
+pandas>=2.0.0
 ccxt
 python-dotenv
 pytz
@@ -11,4 +11,4 @@ flask-cors
 ta
 pyTelegramBotAPI
 numpy
-pyTelegramBotAPI
+setuptools

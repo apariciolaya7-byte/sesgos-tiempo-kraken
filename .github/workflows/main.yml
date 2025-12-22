@@ -1,19 +1,17 @@
 name: Time Bias Analysis Bot
 
-# Define que este workflow se ejecutará de forma manual o todos los lunes a las 00:00 UTC
 on:
   workflow_dispatch:
   schedule:
-    # Programado para ejecutarse todos los lunes a medianoche (00:00 UTC)
-    - cron: '0 0 * * 1' 
+    # Lunes a Viernes a las 13:50 UTC (10 min antes de la Kill Zone)
+    - cron: '50 13 * * 1-5' 
 
 jobs:
   run-analysis:
     runs-on: ubuntu-latest
 
-    # NUEVO BLOQUE DE PERMISOS:
     permissions:
-      contents: write # Esto le da permiso al token para hacer commit y push
+      contents: write 
     
     steps:
     - name: Checkout code
@@ -23,22 +21,31 @@ jobs:
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
-        cache: 'pip' # Acelera las instalaciones futuras
+        cache: 'pip'
 
     - name: Install dependencies
-      run: pip install -r requirements.txt
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Pre-flight Check
+      env:
+        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        KRAKEN_API_KEY: ${{ secrets.KRAKEN_API_KEY }}
+        KRAKEN_SECRET: ${{ secrets.KRAKEN_SECRET }}
+      run: python check_deps.py
 
     - name: Run the analysis script
       env:
-        # Importante: Aquí se inyectan los GitHub Secrets para el bot
+        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         KRAKEN_API_KEY: ${{ secrets.KRAKEN_API_KEY }}
         KRAKEN_SECRET: ${{ secrets.KRAKEN_SECRET }}
       run: python kraken_data.py
       
-    # Paso CLAVE: Guardar los archivos generados (CSV de reporte)
-    - name: Commit and Push new report
+    - name: Commit and Push changes
       uses: stefanzweifel/git-auto-commit-action@v5
       with:
-        # CORRECCIÓN: Usamos 'file_pattern' en lugar de 'files'
-        file_pattern: time_bias_hourly_analysis.csv
-        commit_message: 'ci: Nuevo reporte de sesgo horario'
+        file_pattern: 'time_bias_hourly_analysis.csv open_positions.json kraken.log'
+        commit_message: 'bot: actualización de análisis y estado de posiciones'

@@ -31,9 +31,22 @@ except Exception:
 
 # --- CONFIGURACIÓN INICIAL ---
 load_dotenv()
-TOKEN = os.getenv('TELEGRAM_TOKEN')
-CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
-bot = telebot.TeleBot(TOKEN)
+
+def get_env_variable(name):
+    value = os.getenv(name)
+    if not value:
+        # Esto te dará un mensaje claro en el log de GitHub
+        raise EnvironmentError(f"❌ La variable {name} no está configurada. Revisa los Secrets y el YAML.")
+    return value
+
+try:
+    TOKEN = get_env_variable('TELEGRAM_TOKEN')
+    CHAT_ID = get_env_variable('TELEGRAM_CHAT_ID')
+    bot = telebot.TeleBot(TOKEN)
+    logging.info("Bot configurado correctamente.")
+except Exception as e:
+    logging.error(e)
+    exit(1) # Forzamos el cierre con error para que GitHub te avise
 
 # VARIABLES DE ESTADO GLOBALES
 trading_active = False
@@ -202,14 +215,35 @@ def calculate_atr(df, window=20):
     df['atr'] = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=window)
     return df['atr'].iloc[-1]
 
-def calculate_exit_levels(entry_price, atr_value, direction):
-    risk_amount = atr_value * 1.5
-    profit_amount = atr_value * 3.0
-    if direction == "LONG (COMPRA)":
-        return round(entry_price - risk_amount, 2), round(entry_price + profit_amount, 2)
-    elif direction == "SHORT (VENTA)":
-        return round(entry_price + risk_amount, 2), round(entry_price - profit_amount, 2)
-    return None, None
+def calculate_exit_levels(symbol, entry_price, atr_value, direction):
+    """
+    Calcula SL y TP ajustados al perfil de volatilidad específico de cada moneda.
+    """
+    # Configuración de perfiles (SL_mult, TP_mult)
+    # BTC es más estable: TP más ambicioso. 
+    # SOL/ADA son volátiles: SL más ancho para evitar 'stop-hunting'.
+    profiles = {
+        'BTC/USD': (1.2, 3.5),  # Ajuste fino: SL ceñido, TP largo
+        'ETH/USD': (1.5, 3.0),  # Estándar
+        'SOL/USD': (2.0, 2.5),  # Más ruido: SL ancho, TP más corto para asegurar
+        'ADA/USD': (2.2, 2.5),  # Muy volátil en Kill Zone
+        'XRP/USD': (2.0, 3.0)
+    }
+
+    # Si la moneda no está en el perfil, usamos el estándar (1.5, 3.0)
+    sl_mult, tp_mult = profiles.get(symbol, (1.5, 3.0))
+
+    risk = atr_value * sl_mult
+    reward = atr_value * tp_mult
+
+    if "LONG" in direction:
+        sl = round(entry_price - risk, 4)
+        tp = round(entry_price + reward, 4)
+    else:
+        sl = round(entry_price + risk, 4)
+        tp = round(entry_price - reward, 4)
+
+    return sl, tp
 
 # --- 5. EJECUCIÓN Y TRADING ENGINE ---
 def execute_trade_simulation(symbol, bias_score, atr_multiplier_value, historical_data): 
@@ -231,7 +265,7 @@ def execute_trade_simulation(symbol, bias_score, atr_multiplier_value, historica
     direction = "LONG (COMPRA)" if bias_score > dynamic_threshold else "SHORT (VENTA)" if bias_score < -dynamic_threshold else "NEUTRAL"
 
     if direction != "NEUTRAL":
-        sl, tp = calculate_exit_levels(entry_price, atr_value, direction)
+        sl, tp = calculate_exit_levels(symbol, entry_price, atr_value, direction)
         pos_obj = Position(symbol=symbol, direction=direction, entry_price=entry_price, 
                            amount_base=100/entry_price, stop_loss=sl, take_profit=tp, 
                            status='OPEN', open_time=open_time)
@@ -248,6 +282,36 @@ def execute_live_trade(exchange, symbol, atr_multiplier=0.05, timeframe='1h', ho
     time_bias_score = analyze_gross_return(data_with_zones)
 
     execute_trade_simulation(symbol, time_bias_score, atr_multiplier, historical_data)
+
+def get_multiplier_info(symbol):
+    """Función auxiliar para la auditoría: extrae los multiplicadores actuales."""
+    profiles = {
+        'BTC/USD': (1.2, 3.5), 'ETH/USD': (1.5, 3.0),
+        'SOL/USD': (2.0, 2.5), 'ADA/USD': (2.2, 2.5), 'XRP/USD': (2.0, 3.0)
+    }
+    return profiles.get(symbol, (1.5, 3.0))
+
+def generate_optimization_feedback(closed_trades):
+    if not closed_trades: return ""
+    
+    df = pd.DataFrame(closed_trades)
+    feedback_msg = "\n\n🧠 **SUGERENCIAS DE OPTIMIZACIÓN**\n"
+    
+    for symbol in df['symbol'].unique():
+        symbol_trades = df[df['symbol'] == symbol]
+        sl_hits = len(symbol_trades[symbol_trades['exit_reason'].str.contains('SL', na=False)])
+        total = len(symbol_trades)
+        sl_mult, tp_mult = get_multiplier_info(symbol)
+
+        if total > 0 and (sl_hits / total) >= 0.5:
+            feedback_msg += f"⚠️ {symbol}: Muchas salidas por SL. Sugiero subir ATR de {sl_mult} a {sl_mult + 0.2}.\n"
+        
+        # Auditoría de cierre por tiempo
+        time_exits = len(symbol_trades[symbol_trades['exit_reason'].str.contains('TIME', na=False)])
+        if time_exits > 0:
+            feedback_msg += f"🕒 {symbol}: {time_exits} trades cerrados por fin de sesión. El movimiento es lento hoy.\n"
+            
+    return feedback_msg
 
 def monitor_and_close_positions(current_price_data, exchange):
     global OPEN_POSITIONS, CLOSED_TRADES
@@ -281,12 +345,25 @@ def monitor_and_close_positions(current_price_data, exchange):
 
 # --- 6. REPORTES Y COMANDOS ---
 def print_final_trade_report():
-    if not CLOSED_TRADES: return
+    global CLOSED_TRADES
+    if not CLOSED_TRADES: 
+        bot.send_message(CHAT_ID, "📊 *AUDITORÍA:* No se cerraron trades en esta sesión.")
+        return
+        
     df = pd.DataFrame(CLOSED_TRADES)
     total_pnl = df['pnl_usd'].sum()
     win_rate = (len(df[df['pnl_usd'] > 0]) / len(df)) * 100
-    report = f"📊 *AUDITORÍA FINAL*\nTrades: {len(df)}\nWin Rate: {win_rate:.2f}%\nPNL: ${total_pnl:.2f}"
-    bot.send_message(CHAT_ID, report)
+    
+    # Unimos el reporte numérico con el feedback inteligente
+    header = f"📊 *AUDITORÍA FINAL DE SESIÓN*\n"
+    stats = f"━━━━━━━━━━━━━━━\n✅ Win Rate: {win_rate:.2f}%\n💵 PNL Total: ${total_pnl:.2f}\n📦 Trades Totales: {len(df)}"
+    
+    # Generamos los consejos de "Machine Learning" humano
+    feedback = generate_optimization_feedback(CLOSED_TRADES)
+    
+    bot.send_message(CHAT_ID, header + stats + feedback, parse_mode='Markdown')
+    # Limpiamos para la siguiente sesión
+    CLOSED_TRADES = []
 
 @bot.message_handler(commands=['start_trading'])
 def handle_start(message):
@@ -309,20 +386,54 @@ def handle_stop(message):
 
 def trading_loop(exchange):
     logging.info("Motor de vigilancia iniciado.")
+    global trading_active
+    trading_active = True # Iniciamos activo para GitHub Actions
+    
+    # Ejecutamos el análisis inicial
+    run_initial_positions(exchange)
+    
     while True:
-        if trading_active and OPEN_POSITIONS:
+        now_utc = datetime.now(pytz.utc)
+        
+        # 1. Monitoreo de posiciones
+        if OPEN_POSITIONS:
             try:
-                real_current_prices = {s: exchange.fetch_ticker(s)['last'] for s in set(p['symbol'] for p in OPEN_POSITIONS)}
+                symbols_to_check = list(set(p['symbol'] for p in OPEN_POSITIONS))
+                real_current_prices = {s: exchange.fetch_ticker(s)['last'] for s in symbols_to_check}
                 monitor_and_close_positions(real_current_prices, exchange)
             except Exception as e:
-                logging.error(f"Error en bucle: {e}")
+                logging.error(f"Error en bucle de monitoreo: {e}")
+        
+        # 2. Condición de Salida (Final del Contrato)
+        # Si ya pasó la hora final y no hay nada abierto, cerramos el script
+        if now_utc.hour >= KILL_ZONE_END and not OPEN_POSITIONS:
+            logging.info("🎯 Kill Zone finalizada y posiciones cerradas. Generando reporte...")
+            print_final_trade_report()
+            break # Sale del bucle para que el script termine limpiamente
+            
         time.sleep(60)
+
+    def save_to_csv(trade_record):
+        """Guarda los trades en el CSV que espera GitHub Actions."""
+        file_name = 'time_bias_hourly_analysis.csv'
+        df_new = pd.DataFrame([trade_record])
+    
+    if not os.path.isfile(file_name):
+        df_new.to_csv(file_name, index=False)
+    else:
+        # Añade sin escribir la cabecera de nuevo
+        df_new.to_csv(file_name, mode='a', header=False, index=False)
 
 # --- INICIO ---
 if __name__ == "__main__":
     kraken = initialize_kraken_exchange()
     if kraken:
         load_open_positions()
+        # Iniciamos Telegram en un hilo separado
         threading.Thread(target=lambda: bot.polling(none_stop=True), daemon=True).start()
-        bot.send_message(CHAT_ID, "🖥️ *BOT ONLINE*")
+        bot.send_message(CHAT_ID, "🖥️ *BOT DESPLEGADO EN GITHUB ACTIONS*")
+        
+        # El loop principal ahora tiene fin
         trading_loop(kraken)
+        
+        logging.info("✅ Script finalizado con éxito para commit.")
