@@ -343,6 +343,20 @@ def monitor_and_close_positions(current_price_data, exchange):
             save_open_positions()
             bot.send_message(CHAT_ID, f"🏁 *CIERRE {pos['symbol']}*\nMotivo: {exit_reason}\nPnL: ${pnl_usd:.2f}")
 
+
+def save_to_csv(trade_record):
+    """Guarda los trades en el CSV que espera GitHub Actions."""
+    # Definición de variables (Esto quita los errores de Pylance)
+    file_name = 'time_bias_hourly_analysis.csv'
+    df_new = pd.DataFrame([trade_record])
+    
+    if not os.path.isfile(file_name):
+        df_new.to_csv(file_name, index=False)
+    else:
+        # Añade sin escribir la cabecera de nuevo
+        df_new.to_csv(file_name, mode='a', header=False, index=False)
+
+
 # --- 6. REPORTES Y COMANDOS ---
 def print_final_trade_report():
     global CLOSED_TRADES
@@ -413,16 +427,6 @@ def trading_loop(exchange):
             
         time.sleep(60)
 
-    def save_to_csv(trade_record):
-        """Guarda los trades en el CSV que espera GitHub Actions."""
-        file_name = 'time_bias_hourly_analysis.csv'
-        df_new = pd.DataFrame([trade_record])
-    
-    if not os.path.isfile(file_name):
-        df_new.to_csv(file_name, index=False)
-    else:
-        # Añade sin escribir la cabecera de nuevo
-        df_new.to_csv(file_name, mode='a', header=False, index=False)
 
 # --- INICIO ---
 if __name__ == "__main__":
