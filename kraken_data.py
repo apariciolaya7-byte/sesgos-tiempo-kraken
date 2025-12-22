@@ -162,11 +162,15 @@ def handle_start(message):
     else:
         bot.reply_to(message, "❌ No autorizado.")
 
+        
+
 @bot.message_handler(commands=['stop_trading'])
 def handle_stop(message):
     global trading_active
     trading_active = False
     bot.reply_to(message, "🛑 *SISTEMA DETENIDO*")
+
+
 
 @bot.message_handler(commands=['report'])
 def handle_report_request(message):
@@ -181,6 +185,56 @@ def handle_report_request(message):
         print_final_trade_report(custom_prefix=status_prefix)
     else:
         bot.reply_to(message, "❌ No autorizado.")
+
+
+
+@bot.message_handler(commands=['balance'])
+def handle_balance(message):
+    try:
+        balance = kraken.fetch_balance()
+        # Tomamos el saldo en USD o la moneda base que uses
+        usd_free = balance.get('USD', {}).get('free', 0)
+        usd_total = balance.get('USD', {}).get('total', 0)
+        
+        msg = f"💰 *ESTADO DE CUENTA KRAKEN*\n"
+        msg += f"----------------------------------\n"
+        msg += f"💵 *Disponible:* `${usd_free:.2f}`\n"
+        msg += f"📊 *Total (Equity):* `${usd_total:.2f}`\n"
+        msg += f"📈 *Margen en uso:* `${(usd_total - usd_free):.2f}`\n"
+        
+        bot.reply_to(message, msg, parse_mode='Markdown')
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error al consultar balance: {e}")
+
+
+@bot.message_handler(commands=['status'])
+def handle_status(message):
+    """Auditoría rápida del estado del motor y la cuenta."""
+    if str(message.chat.id) != CHAT_ID: return
+    
+    try:
+        # 1. Datos de Cuenta
+        balance = kraken.fetch_balance()
+        usd_total = balance.get('USD', {}).get('total', 0)
+        
+        # 2. Datos del Bot
+        status_bot = "🟢 ACTIVO" if trading_active else "🔴 DETENIDO"
+        num_pos = len(OPEN_POSITIONS)
+        window = "✅ DENTRO" if is_in_kill_zone() else "⏳ FUERA"
+        
+        msg = (
+            f"🛡️ *AUDITORÍA DE SISTEMA*\n"
+            f"----------------------------------\n"
+            f"🤖 *Bot:* {status_bot}\n"
+            f"🕒 *Kill Zone:* {window} (14-18 UTC)\n"
+            f"📦 *Posiciones:* {num_pos} abiertas\n"
+            f"💰 *Equity:* `${usd_total:.2f}`\n"
+            f"----------------------------------\n"
+            f"📡 *Conexión:* Kraken API OK"
+        )
+        bot.reply_to(message, msg, parse_mode='Markdown')
+    except Exception as e:
+        bot.reply_to(message, f"⚠️ Error en auditoría: {e}")
 
 def run_initial_cycle():
     """Ejecuta execute_live_trade para cada activo del TARGET_ASSETS global"""
