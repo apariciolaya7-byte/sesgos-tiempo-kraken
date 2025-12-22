@@ -162,7 +162,7 @@ def handle_start(message):
     else:
         bot.reply_to(message, "❌ No autorizado.")
 
-        
+
 
 @bot.message_handler(commands=['stop_trading'])
 def handle_stop(message):
@@ -192,19 +192,20 @@ def handle_report_request(message):
 def handle_balance(message):
     try:
         balance = kraken.fetch_balance()
-        # Tomamos el saldo en USD o la moneda base que uses
-        usd_free = balance.get('USD', {}).get('free', 0)
-        usd_total = balance.get('USD', {}).get('total', 0)
+        # Esto nos dirá qué monedas SI tienen saldo mayor a 0
+        total_balance = balance.get('total', {})
+        balances_reales = {k: v for k, v in total_balance.items() if v > 0}
         
-        msg = f"💰 *ESTADO DE CUENTA KRAKEN*\n"
-        msg += f"----------------------------------\n"
-        msg += f"💵 *Disponible:* `${usd_free:.2f}`\n"
-        msg += f"📊 *Total (Equity):* `${usd_total:.2f}`\n"
-        msg += f"📈 *Margen en uso:* `${(usd_total - usd_free):.2f}`\n"
+        if not balances_reales:
+            msg = "⚠️ *Kraken reporta cuenta vacía.* \nVerifica permisos de API (Query Funds) o si tienes el dinero en 'Futures'."
+        else:
+            msg = "💰 *BALANCES DETECTADOS:*\n"
+            for moneda, cantidad in balances_reales.items():
+                msg += f"• {moneda}: `{cantidad}`\n"
         
         bot.reply_to(message, msg, parse_mode='Markdown')
     except Exception as e:
-        bot.reply_to(message, f"❌ Error al consultar balance: {e}")
+        bot.reply_to(message, f"❌ Error de conexión: {e}")
 
 
 @bot.message_handler(commands=['status'])
