@@ -9,3 +9,5 @@ plotly
 flask
 flask-cors
 ta
+pyTelegramBotAPI
+numpy
