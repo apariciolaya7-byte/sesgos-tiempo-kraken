@@ -168,6 +168,20 @@ def handle_stop(message):
     trading_active = False
     bot.reply_to(message, "🛑 *SISTEMA DETENIDO*")
 
+@bot.message_handler(commands=['report'])
+def handle_report_request(message):
+    """Permite consultar el estado de la jornada en cualquier momento."""
+    if str(message.chat.id) == CHAT_ID:
+        # Si hay posiciones abiertas, el reporte es parcial
+        status_prefix = "🕒 *REPORTE PARCIAL (Jornada en curso)*\n"
+        if not is_in_kill_zone():
+            status_prefix = "🏁 *REPORTE DE JORNADA FINALIZADA*\n"
+            
+        bot.send_message(CHAT_ID, "📊 Generando auditoría solicitada...")
+        print_final_trade_report(custom_prefix=status_prefix)
+    else:
+        bot.reply_to(message, "❌ No autorizado.")
+
 def run_initial_cycle():
     """Ejecuta execute_live_trade para cada activo del TARGET_ASSETS global"""
     if not trading_active: return
@@ -611,11 +625,13 @@ def execute_trade_simulation(symbol, bias_score, atr_multiplier_value, historica
     save_open_positions()
 
 
-def print_final_trade_report():
+def print_final_trade_report(custom_prefix=None):
     """Envía un reporte analítico de nivel profesional a Telegram."""
     global CLOSED_TRADES
+    
     if not CLOSED_TRADES:
-        bot.send_message(CHAT_ID, "📊 *REPORTE DE JORNADA*\nNo se cerraron operaciones en este ciclo.")
+        msg = "📊 *REPORTE DE JORNADA*\nNo hay operaciones cerradas todavía."
+        bot.send_message(CHAT_ID, msg)
         return
         
     df_results = pd.DataFrame(CLOSED_TRADES)
@@ -630,13 +646,13 @@ def print_final_trade_report():
     profit_factor = gross_profit / gross_loss if gross_loss != 0 else float('inf')
     win_rate = (len(wins) / len(df_results)) * 100
 
-    # Construcción del mensaje para la comunidad
-    report_msg = "📊 *AUDITORÍA DE DISCIPLINA AUTOMATIZADA*\n"
+    # Construcción del mensaje
+    report_msg = custom_prefix if custom_prefix else "📊 *AUDITORÍA DE DISCIPLINA AUTOMATIZADA*\n"
     report_msg += "--------------------------------------------------\n"
     
-    # Detalle de cada trade
     for _, row in df_results.iterrows():
         icon = "✅" if row['pnl_usd'] > 0 else "❌"
+        # Mostramos el símbolo y el motivo de salida
         report_msg += f"{icon} *{row['symbol']}* | {row['exit_reason']}\n"
         report_msg += f"      PnL: `${row['pnl_usd']:.2f}`\n"
     
@@ -646,7 +662,12 @@ def print_final_trade_report():
     report_msg += f"📈 *Profit Factor:* `{profit_factor:.2f}`\n"
     report_msg += f"💰 *PNL TOTAL:* `${total_pnl:.2f}`\n"
     report_msg += "--------------------------------------------------\n"
-    report_msg += "🤖 _Ejecución 100% algorítmica sin intervención humana._"
+    
+    # Si hay posiciones abiertas actualmente, avisamos
+    if OPEN_POSITIONS:
+        report_msg += f"⚠️ _Aviso: Hay {len(OPEN_POSITIONS)} posiciones aún abiertas._\n"
+        
+    report_msg += "🤖 _Ejecución 100% algorítmica._"
 
     bot.send_message(CHAT_ID, report_msg, parse_mode='Markdown')
 
