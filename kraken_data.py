@@ -14,6 +14,24 @@ from logging.handlers import TimedRotatingFileHandler
 from dataclasses import dataclass, asdict, field
 from typing import List, Optional, Any, Dict
 
+
+BANK_FILE = 'virtual_bank.json'
+
+def get_virtual_balance():
+    try:
+        with open(BANK_FILE, 'r') as f:
+            data = json.load(f)
+            return data.get('balance', 500.0)
+    except FileNotFoundError:
+        return 500.0
+
+def update_virtual_balance(amount):
+    current = get_virtual_balance()
+    new_balance = current + amount
+    with open(BANK_FILE, 'w') as f:
+        json.dump({"balance": round(new_balance, 2)}, f)
+    return new_balance
+
 # --- 1. CONFIGURACIÓN GLOBAL (Accesible para todas las funciones) ---
 load_dotenv()
 TOKEN = os.getenv('TELEGRAM_TOKEN')
@@ -190,22 +208,24 @@ def handle_report_request(message):
 
 @bot.message_handler(commands=['balance'])
 def handle_balance(message):
-    try:
-        balance = kraken.fetch_balance()
-        # Esto nos dirá qué monedas SI tienen saldo mayor a 0
-        total_balance = balance.get('total', {})
-        balances_reales = {k: v for k, v in total_balance.items() if v > 0}
-        
-        if not balances_reales:
-            msg = "⚠️ *Kraken reporta cuenta vacía.* \nVerifica permisos de API (Query Funds) o si tienes el dinero en 'Futures'."
-        else:
-            msg = "💰 *BALANCES DETECTADOS:*\n"
-            for moneda, cantidad in balances_reales.items():
-                msg += f"• {moneda}: `{cantidad}`\n"
-        
-        bot.reply_to(message, msg, parse_mode='Markdown')
-    except Exception as e:
-        bot.reply_to(message, f"❌ Error de conexión: {e}")
+    balance_actual = get_virtual_balance() # Lee el JSON de 500$
+    num_pos = len(OPEN_POSITIONS)
+    
+    # Simulación de margen: restamos 10$ virtuales por cada posición abierta
+    disponible = balance_actual - (num_pos * 10)
+    
+    msg = f"💰 *CONTABILIDAD VIRTUAL*\n"
+    msg += f"----------------------------------\n"
+    msg += f"💵 *Capital Total:* `${balance_actual:.2f}`\n"
+    msg += f"📉 *Disponible:* `${max(0, disponible):.2f}`\n"
+    msg += f"📦 *Posiciones:* {num_pos} activas\n"
+    msg += f"----------------------------------\n"
+    
+    pnl_acumulado = balance_actual - 500.0
+    status_icon = "📈" if pnl_acumulado >= 0 else "📉"
+    msg += f"{status_icon} *PnL Histórico:* `${pnl_acumulado:.2f}`"
+    
+    bot.reply_to(message, msg, parse_mode='Markdown')
 
 
 @bot.message_handler(commands=['status'])
@@ -490,97 +510,78 @@ def calculate_exit_levels(entry_price, atr_value, direction):
 
 def monitor_and_close_positions(current_price_data, exchange):
     """
-    Monitorea posiciones abiertas contra SL/TP/Time Exit.
-    current_price_data: Diccionario con precios actuales (simulados o reales).
-    exchange: Instancia de CCXT para obtener la hora y potencialmente ejecutar órdenes reales.
+    Monitorea posiciones abiertas y actualiza el saldo virtual al cerrar.
     """
     global OPEN_POSITIONS, CLOSED_TRADES 
 
-    # 1. Obtener la hora actual UTC
-    # Usamos la hora local de la máquina y la convertimos a UTC
     now_utc = datetime.now(pytz.utc)
     current_utc_hour = now_utc.hour
     
-    # Si estamos dentro de la Kill Zone, no deberíamos aplicar Time Exit todavía.
-    # El Time Exit solo aplica DESPUÉS de la hora de cierre de la Kill Zone.
+    # El Time Exit solo aplica DESPUÉS de la hora de cierre de la Kill Zone
     time_exit_allowed = (current_utc_hour >= KILL_ZONE_END)
     
-    if time_exit_allowed:
-        logging.info(f"--- [ CIERRE POR TIEMPO ACTIVO ] --- Hora actual: {now_utc.strftime('%H:%M:%S')} UTC")
-    else:
-        logging.info(f"--- [ MONITOREO SL/TP ] --- Hora actual: {now_utc.strftime('%H:%M:%S')} UTC")
+    logging.info(f"--- [ MONITOREO ACTIVO ] --- Hora: {now_utc.strftime('%H:%M:%S')} UTC")
 
-
-    # Recorrer las posiciones de atrás hacia adelante para eliminar sin problemas
+    # Recorrer de atrás hacia adelante para evitar errores de índice al eliminar
     for i in range(len(OPEN_POSITIONS) - 1, -1, -1):
         pos = OPEN_POSITIONS[i]
-        # Aceptar tanto `Position` como `dict` en la lista de posiciones.
-        # Si es `Position`, convertir y reemplazar el elemento en la lista
-        # para mantener consistencia con el resto del código que usa dicts.
+        
         if isinstance(pos, Position):
             pos = OPEN_POSITIONS[i] = pos.to_dict()
+            
         symbol = pos['symbol']
-        
         current_price = current_price_data.get(symbol)
         
         if current_price is None:
-            logging.warning(f"ADVERTENCIA: Precio actual no encontrado para {symbol}. Saltando monitoreo.")
             continue
             
         exit_reason = None
         close_price = None 
 
-        # 2. Lógica de CIERRE por SL/TP (Prioridad Máxima)
+        # 1. Lógica de SL/TP
         if pos['direction'] == 'LONG (COMPRA)':
             if current_price >= pos['take_profit']:
-                exit_reason = "TAKE PROFIT (TP)"
-                close_price = pos['take_profit'] # Usar nivel fijo
+                exit_reason, close_price = "TAKE PROFIT (TP)", pos['take_profit']
             elif current_price <= pos['stop_loss']:
-                exit_reason = "STOP LOSS (SL)"
-                close_price = pos['stop_loss'] # Usar nivel fijo
+                exit_reason, close_price = "STOP LOSS (SL)", pos['stop_loss']
         
         elif pos['direction'] == 'SHORT (VENTA)':
             if current_price <= pos['take_profit']: 
-                exit_reason = "TAKE PROFIT (TP)"
-                close_price = pos['take_profit'] # Usar nivel fijo
+                exit_reason, close_price = "TAKE PROFIT (TP)", pos['take_profit']
             elif current_price >= pos['stop_loss']: 
-                exit_reason = "STOP LOSS (SL)"
-                close_price = pos['stop_loss'] # Usar nivel fijo
+                exit_reason, close_price = "STOP LOSS (SL)", pos['stop_loss']
 
-        # 3. Lógica de CIERRE por Tiempo (Time Exit)
-        # Solo se ejecuta si no se ha cerrado por SL/TP y el tiempo ha expirado
+        # 2. Lógica de Time Exit
         if exit_reason is None and time_exit_allowed:
             exit_reason = "TIME EXIT (KZ EXPIRÓ)"
-            close_price = current_price # Cerrar al precio de mercado (simulado)
+            close_price = current_price 
             
-        # 4. Ejecución del Cierre y Registro
+        # 3. EJECUCIÓN DEL CIERRE Y ACTUALIZACIÓN DE CAPITAL
         if exit_reason:
-            
-            # Calcular PnL (Ganancia/Pérdida)
+            # Calcular PnL
             pnl_usd = (close_price - pos['entry_price']) * pos['amount_base']
-            
-            # Si fue un SHORT, el cálculo debe ser inverso 
             if pos['direction'] == 'SHORT (VENTA)':
                 pnl_usd = -pnl_usd 
 
-            pnl_status = "GANANCIA" if pnl_usd > 0 else "PÉRDIDA"
+            # --- PUNTO CRÍTICO: Actualización del Banco Virtual ---
+            # Sumamos (o restamos) el resultado del trade al balance de 500$
+            nuevo_saldo = update_virtual_balance(pnl_usd)
+            # ------------------------------------------------------
+
+            pnl_status = "GANANCIA ✅" if pnl_usd > 0 else "PÉRDIDA ❌"
+            logging.info(f"💰 CIERRE {symbol} | {exit_reason} | PnL: ${pnl_usd:.2f} | Nuevo Saldo: ${nuevo_saldo:.2f}")
             
-            logging.info(f"CIERRE {symbol} | Motivo: {exit_reason} | PnL: ${pnl_usd:.2f} ({pnl_status})")
-            
-            # Mover la posición a la lista de cerradas y eliminar de la lista abierta
+            # Registrar el cierre
             pos['status'] = 'CLOSED'
             pos['exit_price'] = close_price 
             pos['exit_reason'] = exit_reason
             pos['pnl_usd'] = pnl_usd 
             
             CLOSED_TRADES.append(OPEN_POSITIONS.pop(i))
-
             save_open_positions()
-            
+
     if not OPEN_POSITIONS:
-        logging.info("NO HAY POSICIONES ABIERTAS PENDIENTES")
-    else:
-        logging.info(f"{len(OPEN_POSITIONS)} POSICIONES ABIERTAS PENDIENTES")
+        logging.info("📭 Sin posiciones abiertas.")
 
 
 # ----------------------------------------------------
@@ -592,7 +593,13 @@ def execute_trade_simulation(symbol, bias_score, atr_multiplier_value, historica
     Simula una orden de mercado con cálculo de Stop Loss y Take Profit.
     Ahora incluye filtro de robustez ATR Mín/Máx.
     """
-    global OPEN_POSITIONS
+    # --- CAMBIO CRÍTICO: Riesgo Dinámico ---
+    saldo_actual = get_virtual_balance()
+    # Arriesgamos el 1% del capital total por operación (50$ si hay 500$)
+    amount_usd = saldo_actual * 0.01 
+    
+    entry_price = historical_data['close'].iloc[-1]
+    amount_base = amount_usd / entry_price
 
     # 1. Obtener precios y calcular ATR
     try:
