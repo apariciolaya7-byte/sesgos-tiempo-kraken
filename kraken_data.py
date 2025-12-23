@@ -220,17 +220,60 @@ def handle_start(message):
         bot.reply_to(message, "❌ No autorizado.")
 
 
-def run_initial_cycle():
-    if not trading_active: return
+def run_trading_cycle(kraken):
+    global trading_active
+    if not trading_active:
+        return
+
+    # Diccionario para recolectar qué pasó con cada moneda en esta vuelta
+    reporte_vuelta = {}
+    
+    # Lista de tus monedas: ADA, LINK, BCH, ETH, BTC, UNI, SOL, DOT
     for symbol in TARGET_ASSETS:
-        # Si alguien pulsa /stop en Telegram mientras el bucle recorre monedas
-        if not trading_active: 
-            logging.info("🛑 Parada de emergencia detectada en medio del ciclo.")
-            break 
         try:
-            execute_live_trade(kraken, symbol, OPTIMAL_ATR_MULTIPLIER, '1h', HOURS_TO_ANALYZE)
+            # Capturamos el diccionario que devuelve execute_live_trade
+            resultado = execute_live_trade(kraken, symbol)
+            reporte_vuelta[symbol] = resultado
         except Exception as e:
-            logging.error(f"Error en {symbol}: {e}")
+            reporte_vuelta[symbol] = {"veredicto": f"ERROR: {str(e)[:10]}", "bias": 0}
+
+    # Una vez analizadas todas, enviamos el informe único
+    enviar_informe_telegram(reporte_vuelta)
+
+
+def enviar_informe_telegram(data_reporte):
+    ahora_utc = datetime.now(pytz.utc).strftime('%H:%M')
+    balance = get_virtual_balance() # Para saber cómo va la cuenta
+    
+    msg = f"🛰️ **INFORME DE RADAR | {ahora_utc} UTC**\n"
+    msg += f"💰 **Balance Virtual:** ${balance:.2f}\n"
+    msg += "----------------------------------\n"
+
+    for symbol, info in data_reporte.items():
+        veredicto = info.get('veredicto', 'N/A')
+        bias = info.get('bias', 0)
+        
+        # Asignamos emoji según el veredicto
+        if "EJECUTADO" in veredicto:
+            status = "✅ ENTRADA"
+        elif "AUDITOR" in veredicto:
+            status = f"🛡️ BLOQUEO ({veredicto.split(':')[-1].strip()})"
+        elif "RUIDO" in veredicto:
+            status = "📉 RUIDO (Estratega)"
+        elif "NEUTRAL" in veredicto:
+            status = "⚪ NEUTRAL"
+        else:
+            status = f"❓ {veredicto}"
+
+        msg += f"**{symbol}**: {status} | Bias: `{bias:.2f}`\n"
+
+    msg += "----------------------------------\n"
+    msg += "🧐 *Estado: Vigilando mercado...*"
+    
+    try:
+        bot.send_message(CHAT_ID, msg, parse_mode='Markdown')
+    except Exception as e:
+        print(f"Error Telegram: {e}")
 
 
 @bot.message_handler(commands=['stop_trading'])
@@ -318,6 +361,46 @@ def run_initial_cycle():
         except Exception as e:
             logging.error(f"Error en {symbol}: {e}")
 
+
+def enviar_reporte_consolidado(diagnostico_total):
+    """
+    Recibe un diccionario con los resultados de todos los activos 
+    y envía UN SOLO mensaje de Telegram.
+    """
+    ahora_utc = datetime.now(pytz.utc).strftime('%H:%M')
+    informe = f"📊 **REPORTE DE CICLO - {ahora_utc} UTC**\n"
+    informe += "----------------------------------\n"
+    
+    resumen_estados = {"ENTRADA": 0, "BLOQUEO": 0, "RUIDO": 0}
+
+    for symbol, info in diagnostico_total.items():
+        # Emoji y estado según el veredicto
+        if info['veredicto'] == "EJECUTADO":
+            emoji = "✅"
+            resumen_estados["ENTRADA"] += 1
+            detalle = "Orden enviada"
+        elif "AUDITOR" in info['veredicto']:
+            emoji = "🛡️"
+            resumen_estados["BLOQUEO"] += 1
+            detalle = info['veredicto'].split(":")[1] # El motivo del auditor
+        elif info['veredicto'] == "RUIDO":
+            emoji = "📉"
+            resumen_estados["RUIDO"] += 1
+            detalle = "Ruido/Mechas"
+        else:
+            emoji = "⚪"
+            detalle = "Sin Sesgo/Neutral"
+
+        informe += f"{emoji} **{symbol}**: {detalle}\n"
+
+    informe += "----------------------------------\n"
+    informe += f"📈 Resumen: {resumen_estados['ENTRADA']} ON | {resumen_estados['BLOQUEO']} BLOCK | {resumen_estados['RUIDO']} RUIDO"
+    
+    try:
+        bot.send_message(CHAT_ID, informe, parse_mode='Markdown')
+    except Exception as e:
+        logging.error(f"Error enviando informe: {e}")
+
 # --- 6. BUCLE PRINCIPAL ---
 
 def trading_loop(exchange):
@@ -369,34 +452,45 @@ def fetch_recent_data(exchange, symbol='BTC/USD', timeframe='1h', limit=50):
 def execute_live_trade(kraken, symbol, atr_multiplier=0.05, timeframe='1h', hours_to_analyze=50):
     global OPEN_POSITIONS, trading_active
     
-    # Detenemos si el usuario pulsó /stop_trading
-    if not trading_active: return 
+    if not trading_active: 
+        return {"veredicto": "STOPPED"}
 
     historical_data = fetch_recent_data(kraken, symbol, timeframe, limit=hours_to_analyze)
-    if historical_data is None or historical_data.empty: return
+    if historical_data is None or historical_data.empty: 
+        return {"veredicto": "ERROR_DATA"}
 
     processed_data = preprocess_data_for_time_bias(historical_data)
     data_with_zones = mark_kill_zones(processed_data)
     
-    # --- PASO 1: EL ESTRATEGA (¿El patrón es visible?) ---
+    # --- PASO 1: EL ESTRATEGA ---
     estado_mercado = estratega_no_supervisado(data_with_zones)
     bias_score = analyze_gross_return(data_with_zones)
     
-    # --- PASO 2: EL AUDITOR (¿Es seguro?) ---
+    # --- PASO 2: EL AUDITOR ---
     balance_actual = get_virtual_balance()
     is_safe, reason = auditor.check_safety(symbol, OPEN_POSITIONS, balance_actual)
 
-    # --- DECISIÓN FINAL ---
+    # --- LÓGICA DE RETORNO PARA EL INFORME ---
+    
     if not is_safe:
         logging.info(f"🛡️ AUDITOR: {reason}")
-        return
+        return {"veredicto": f"AUDITOR: {reason}", "bias": bias_score}
 
     if estado_mercado == "RUIDO_LATERAL":
-        logging.info(f"📉 ESTRATEGA: Mercado errático en {symbol}. Evitando trampa.")
-        return
+        logging.info(f"📉 ESTRATEGA: Mercado errático en {symbol}.")
+        return {"veredicto": "RUIDO", "bias": bias_score}
 
-    # Si todo es OK, ejecutamos
-    execute_trade_simulation(symbol, bias_score, atr_multiplier, historical_data)   
+    # Si pasa los filtros, evaluamos si el Bias es suficiente para entrar
+    # Aquí asumo que tienes un umbral, ej: abs(bias_score) > 0
+    if abs(bias_score) < 0.1: # Ajusta este umbral según tus pruebas
+        return {"veredicto": "NEUTRAL", "bias": bias_score}
+
+    # EJECUCIÓN
+    try:
+        execute_trade_simulation(symbol, bias_score, atr_multiplier, historical_data)
+        return {"veredicto": "EJECUTADO", "bias": bias_score}
+    except Exception as e:
+        return {"veredicto": f"ERROR_EXEC: {str(e)[:10]}", "bias": bias_score}  
       
 
 def preprocess_data_for_time_bias(df):
