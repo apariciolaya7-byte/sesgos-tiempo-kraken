@@ -520,7 +520,7 @@ def preprocess_data_for_time_bias(df):
 # Tiempos de ejemplo para la superposición Londres/Nueva York:
 # La Kill Zone es de 08:00 a 12:00 UTC (4 horas de alta volatilidad)
 KILL_ZONE_START = 00
-KILL_ZONE_END = 23
+KILL_ZONE_END = 03
 
 def mark_kill_zones(df):
     """
@@ -969,4 +969,4 @@ if __name__ == "__main__":
                     logging.error(f"Error crítico en el ciclo: {e}")
             
             # Esperar 1 minuto entre chequeos
-            time.sleep(60)
+            time.sleep(900)
