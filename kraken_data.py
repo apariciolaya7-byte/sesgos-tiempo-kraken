@@ -520,8 +520,8 @@ def preprocess_data_for_time_bias(df):
 
 # Tiempos de ejemplo para la superposición Londres/Nueva York:
 # La Kill Zone es de 08:00 a 12:00 UTC (4 horas de alta volatilidad)
-KILL_ZONE_START = 2
-KILL_ZONE_END = 6
+KILL_ZONE_START = 14
+KILL_ZONE_END = 18
 
 def mark_kill_zones(df):
     """
