@@ -61,7 +61,8 @@ class TradingAuditor:
         if len(current_positions) >= self.max_simultaneous:
             return False, f"Límite de {self.max_simultaneous} posiciones alcanzado."
         
-        if any(p['symbol'] == symbol for p in current_positions):
+        # --- CORRECCIÓN AQUÍ: Cambiamos p['symbol'] por p.symbol ---
+        if any(p.symbol == symbol for p in current_positions):
             return False, f"Ya operando {symbol}."
             
         # Stop Loss Global: Protegemos los $500
